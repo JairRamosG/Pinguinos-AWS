@@ -3,13 +3,35 @@ import aws_cdk.assertions as assertions
 
 from pinguinos.pinguinos_stack import PinguinosStack
 
-# example tests. To run these tests, uncomment this file along with the example
-# resource in pinguinos/pinguinos_stack.py
-def test_sqs_queue_created():
+
+def _template() -> assertions.Template:
     app = core.App()
     stack = PinguinosStack(app, "pinguinos")
-    template = assertions.Template.from_stack(stack)
+    return assertions.Template.from_stack(stack)
 
-#     template.has_resource_properties("AWS::SQS::Queue", {
-#         "VisibilityTimeout": 300
-#     })
+
+def test_solo_hay_un_bucket():
+    template = _template()
+    template.resource_count_is("AWS::S3::Bucket", 1)
+
+
+def test_bucket_privado_y_versionado():
+    template = _template()
+    template.has_resource_properties("AWS::S3::Bucket", {
+        "VersioningConfiguration": {"Status": "Enabled"},
+        "PublicAccessBlockConfiguration": {
+            "BlockPublicAcls": True,
+            "BlockPublicPolicy": True,
+            "IgnorePublicAcls": True,
+            "RestrictPublicBuckets": True,
+        },
+    })
+
+
+def test_bucket_se_borra_con_el_stack():
+    template = _template()
+    buckets = template.find_resources("AWS::S3::Bucket")
+    assert len(buckets) == 1
+    bucket = next(iter(buckets.values()))
+    assert bucket["DeletionPolicy"] == "Delete"
+    assert bucket["UpdateReplacePolicy"] == "Delete"
