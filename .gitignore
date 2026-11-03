@@ -10,3 +10,6 @@ cdk.out
 
 # Agentes
 .atl/
+
+# Artefactos de entrenamiento
+artifacts/
