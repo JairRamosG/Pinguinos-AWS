@@ -1,0 +1,5 @@
+[data]
+uri = "s3://pinguinos-datos/raw/penguins.csv"
+
+[output]
+uri = "s3://pinguinos-datos/models/"

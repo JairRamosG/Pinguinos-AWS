@@ -1,0 +1,23 @@
+[run]
+seed = 42
+folds = 5
+stratify = true
+
+[data]
+target = "species"
+features = [
+    "island",
+    "bill_length_mm",
+    "bill_depth_mm",
+    "flipper_length_mm",
+    "body_mass_g",
+    "sex",
+]
+
+[model]
+type = "random_forest"
+n_estimators = 200
+max_depth = 5
+
+[output]
+uri = "artifacts/"

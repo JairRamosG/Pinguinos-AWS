@@ -1,0 +1,27 @@
+[project]
+name = "penguins-ml"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Palmer Penguins ML Lifecycle on AWS"
+dependencies = [
+    "boto3>=1.43.123",
+    "pandas>=3.1.0",
+    "pydantic>=2.14.2",
+    "scikit-learn>=1.9.1",
+]
+
+[project.optional-dependencies]
+infra = [
+    "aws-cdk-lib>=2.275.0,<3.0.0",
+    "constructs>=10.5.0,<11.0.0",
+]
+dev = [
+    "pytest==8.4.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/penguins_ml"]
