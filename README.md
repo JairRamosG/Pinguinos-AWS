@@ -56,3 +56,12 @@ command.
  * `cdk docs`        open CDK documentation
 
 Enjoy!
+
+## Credenciales
+
+Este proyecto usa roles de IAM. EC2 usa instance profiles y ECS usa task roles;
+nunca se commitean credenciales.
+
+- Sin access keys en el repositorio.
+- MFA activo en el usuario IAM y en la cuenta root.
+- Migración a credenciales de corta duración: issue #8.
