@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-03 · Fase actual: 1 (pipeline local)
+> Última actualización: 2026-11-03 · Fase actual: 2 (bucket S3 construido y verificado)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -192,8 +192,8 @@ Actualizado al: **2026-11-03**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
-| #1 Línea base | 🟡 en curso | `docs/` commiteado · MFA en usuario y root · budget $5/mes · `CDKToolkit` `CREATE_COMPLETE` (v32) |
-| #2 Bucket S3 | ⬜ pendiente | — |
+| #1 Línea base | ✅ cerrado | `docs/` commiteado · MFA en usuario y root · budget $5/mes · `CDKToolkit` v32 |
+| #2 Bucket S3 | ✅ construido y destruido | Bucket privado, versionado, cifrado, `DESTROY` + `auto_delete_objects` · 3 tests · ciclo completo verificado **con un objeto dentro** |
 | #3 Paquete | ⬜ pendiente | — |
 | #4 Pipeline | ⬜ pendiente | — |
 | #5 Entrenamiento | ⬜ pendiente | — |
@@ -211,6 +211,14 @@ Actualizado al: **2026-11-03**
 | #17 CI/CD | ⬜ pendiente | — |
 | #18 Drill | ⬜ pendiente | — |
 
+**Dos estados distintos que conviene no confundir:**
+
+- **Construido** = existe el código, los tests y la capacidad de desplegarlo.
+- **Desplegado** = existe ahora mismo en la cuenta.
+
+Este proyecto trabaja en modo construir-y-destruir: lo construido persiste en git, lo desplegado
+es efímero.
+
 **Lo que existe hoy en AWS** (además del bootstrap):
 
 ```mermaid
@@ -219,7 +227,7 @@ flowchart LR
         TK["CDKToolkit<br/>bucket de assets · 5 roles · SSM v32"]
         BUD["Budget Pinguinos-Mensual<br/>$5/mes · alerta 80%"]
     end
-    NADA["Sin recursos de aplicación todavía"]
+    NADA["Sin recursos de aplicación desplegados<br/>(el bucket S3 se destruyó tras verificarlo)"]
 ```
 
 ---
@@ -230,11 +238,11 @@ Este diagrama crece con el proyecto. Cada cierre de issue agrega su bloque.
 
 ```mermaid
 flowchart TB
-    subgraph HOY["Estado actual"]
-        BOOT["CDKToolkit"]
+    subgraph HOY["Construido"]
+        BOOT["CDKToolkit<br/>(desplegado)"]
+        S3["bucket S3 privado<br/>versionado · cifrado · destruible<br/>(verificado y destruido)"]
     end
     subgraph DESPUES["Lo que viene"]
-        S3[("S3 datos + modelos")]
         PKG["penguins_ml<br/>paquete"]
         IMG["imágenes<br/>train · serve · jupyter"]
         EC2["EC2 dev<br/>Jupyter + MLflow"]
@@ -253,6 +261,7 @@ flowchart TB
 | Fecha | Cambio |
 |---|---|
 | 2026-11-03 | Creación del documento. Issue #1 en curso: bootstrap completado, budget creado, MFA activo. |
+| 2026-11-03 | Issue #1 cerrado. Issue #2 construido: bucket S3 privado, versionado, cifrado, con `DESTROY` + `auto_delete_objects`; 3 tests; ciclo deploy/destroy verificado con un objeto dentro. Se agrega la distinción construido ≠ desplegado. |
 
 ---
 
