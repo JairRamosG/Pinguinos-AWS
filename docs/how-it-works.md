@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-03 · Fase actual: 2 (bucket S3 construido y verificado)
+> Última actualización: 2026-11-03 · Fase actual: 1 (EDA + pipeline de preprocesamiento)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -194,8 +194,8 @@ Actualizado al: **2026-11-03**
 |---|---|---|
 | #1 Línea base | ✅ cerrado | `docs/` commiteado · MFA en usuario y root · budget $5/mes · `CDKToolkit` v32 |
 | #2 Bucket S3 | ✅ construido y destruido | Bucket privado, versionado, cifrado, `DESTROY` + `auto_delete_objects` · 3 tests · ciclo completo verificado **con un objeto dentro** |
-| #3 Paquete | ⬜ pendiente | — |
-| #4 Pipeline | ⬜ pendiente | — |
+| #3 Paquete | ✅ cerrado | `penguins_ml` instalable · `pyproject.toml` con grupos `dev`/`infra` · `uv.lock` (40 paquetes) · config TOML validada con Pydantic · 8 tests |
+| #4 Pipeline + EDA | ⬜ siguiente | Incluye `notebooks/01_eda.ipynb`: tabla de decisiones que justifica la config y las transformaciones |
 | #5 Entrenamiento | ⬜ pendiente | — |
 | #6 Imágenes | ⬜ pendiente | — |
 | #7 Streamlit local | ⬜ pendiente | — |
@@ -262,6 +262,7 @@ flowchart TB
 |---|---|
 | 2026-11-03 | Creación del documento. Issue #1 en curso: bootstrap completado, budget creado, MFA activo. |
 | 2026-11-03 | Issue #1 cerrado. Issue #2 construido: bucket S3 privado, versionado, cifrado, con `DESTROY` + `auto_delete_objects`; 3 tests; ciclo deploy/destroy verificado con un objeto dentro. Se agrega la distinción construido ≠ desplegado. |
+| 2026-11-03 | Issue #3 cerrado: paquete `penguins_ml`, `pyproject` con grupos, `uv.lock`, config TOML validada y 8 tests. El EDA se integra como **paso 0 del issue #4**, no como issue aparte, para no fragmentar el trabajo. |
 
 ---
 
