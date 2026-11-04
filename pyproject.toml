@@ -16,6 +16,7 @@ infra = [
     "constructs>=10.5.0,<11.0.0",
 ]
 dev = [
+    "matplotlib>=3.11.2",
     "pytest==8.4.2",
 ]
 
