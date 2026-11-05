@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 class RunConfig(BaseModel):
     seed: int = 42
@@ -18,6 +18,14 @@ class DataConfig(BaseModel):
     uri: str
     target: str = "species"
     features: list[str]
+    categorical: list[str] = []
+
+    @model_validator(mode="after")
+    def _categorical_debe_estar_en_features(self) -> "DataConfig":
+        unknown = [c for c in self.categorical if c not in self.features]
+        if unknown:
+            raise ValueError(f"categorical contiene columnas ausentes en features: {unknown}")
+        return self
 
 class ModelConfig(BaseModel):
     type: str = "random_forest"

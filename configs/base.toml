@@ -13,6 +13,7 @@ features = [
     "body_mass_g",
     "sex",
 ]
+categorical = ["island", "sex"]
 
 [model]
 type = "random_forest"
