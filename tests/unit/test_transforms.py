@@ -150,3 +150,24 @@ def test_categorical_debe_estar_en_features(tmp_path) -> None:
 
     with pytest.raises(ValidationError):
         load_config(path)
+
+def test_logistic_regression_entrena_y_predice(tmp_path) -> None:
+    config = _config(tmp_path, model_type="logistic_regression")
+    df = _df()
+
+    pipeline = build_pipeline(config)
+    pipeline.fit(df[FEATURES], df["species"])
+
+    assert set(pipeline.predict(df[FEATURES])).issubset(set(df["species"]))
+
+
+def test_logistic_regression_es_multiclase(tmp_path) -> None:
+    config = _config(tmp_path, model_type="logistic_regression")
+    df = _df()
+
+    pipeline = build_pipeline(config)
+    pipeline.fit(df[FEATURES], df["species"])
+    model = pipeline.named_steps["estimator"]
+
+    assert model.coef_.shape[0] == 3
+    assert pipeline.predict_proba(df[FEATURES]).shape == (len(df), 3)

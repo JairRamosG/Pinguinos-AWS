@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -42,7 +43,7 @@ def _build_preprocessor(config: TrainConfig) -> ColumnTransformer:
     if categorical:
         transformers.append(("categorical", categorical_steps, categorical))
 
-    return ColumnTransformer(transformers = transformers)
+    return ColumnTransformer(transformers = transformers, remainder = "drop")
 
 
 def _build_estimator(config: TrainConfig):
@@ -56,8 +57,12 @@ def _build_estimator(config: TrainConfig):
             max_depth = config.model.max_depth,
             random_state = config.run.seed
         )
-    else:
-        raise ValueError(f"Modelo no soportado: {config.model.type!r}")
+    if config.model.type == "logistic_regression":
+        return LogisticRegression(
+            max_iter = config.model.max_iter,
+            random_state = config.run.seed
+        )
+    raise ValueError(f"Modelo no soportado: {config.model.type!r}")
 
 
 def build_pipeline(config: TrainConfig) -> Pipeline:

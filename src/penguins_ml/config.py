@@ -31,6 +31,7 @@ class ModelConfig(BaseModel):
     type: str = "random_forest"
     n_estimators: int = Field(default=100, ge=1)
     max_depth: int | None = Field(default=None, ge=1)
+    max_iter: int = Field(default=1000, ge=1)
 
 class OutputConfig(BaseModel):
     uri: str = "artifacts/"
