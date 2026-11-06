@@ -46,7 +46,7 @@ def _build_preprocessor(config: TrainConfig) -> ColumnTransformer:
     return ColumnTransformer(transformers = transformers, remainder = "drop")
 
 
-def _build_estimator(config: TrainConfig):
+def _build_estimator(config: TrainConfig) -> RandomForestClassifier | LogisticRegression:
     """
     Devuelve un modelo según lo especificado en la configuración
     """
