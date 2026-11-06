@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-03 · Fase actual: 1 (EDA + pipeline de preprocesamiento)
+> Última actualización: 2026-11-06 · Fase actual: 1 (entrenamiento, procedencia y artefacto)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -12,8 +12,8 @@ las piezas y cómo se mueve un cambio desde tu editor hasta la nube.
 ## Cómo usar este documento
 
 - Léelo antes de cada sesión de trabajo. Son 5 minutos y te devuelve el contexto.
-- Al cerrar un issue, se actualizan: la tabla de estado (§8), el mapa acumulado (§9) y
-  el registro de cambios (§10).
+- Al cerrar un issue, se actualizan: la tabla de estado (§9), el mapa acumulado (§10) y
+  el registro de cambios (§11).
 - Si algo de aquí contradice al código, **el código gana** y este documento se corrige.
 
 ---
@@ -31,12 +31,13 @@ hasta el despliegue.
 
 ---
 
-## 2. Los tres artefactos
+## 2. Los cuatro artefactos
 
 | Artefacto | Lo produce | Vive en | Contiene |
 |---|---|---|---|
 | **Código** | `git commit` | GitHub | La fuente de verdad |
 | **Imagen** | `docker build` | ECR | Python + dependencias + tu paquete |
+| **Modelo** | `python -m penguins_ml.train` | `artifacts/` → S3 | `model.pkl` + `manifest.json` + `cv.json` |
 | **Template** | `cdk synth` | `cdk.out/` → CloudFormation | Qué recursos deben existir |
 
 ```mermaid
@@ -44,6 +45,8 @@ flowchart LR
     SRC["src/ + configs/<br/>(código fuente)"] -->|"git commit"| GIT[("GitHub")]
     SRC -->|"docker build"| IMG["imagen :SHA"]
     IMG -->|"docker push"| ECR[("ECR")]
+    SRC -->|"python -m penguins_ml.train"| ART["artefacto de modelo<br/>model.pkl + manifest"]
+    ART -->|"upload"| S3A[("S3 modelos")]
     CDK["pinguinos_stack.py"] -->|"cdk synth"| TPL["template JSON"]
     TPL -->|"cdk deploy"| CFN["CloudFormation"]
     CFN -->|"crea"| INFRA["recursos reales"]
@@ -55,6 +58,8 @@ Ninguno reemplaza a otro:
 - El código no corre en la nube. **La imagen corre.**
 - La imagen no sabe dónde vive. **El template lo decide.**
 - El template no contiene tu lógica. **Solo declara recursos.**
+- El **modelo** no se construye: se **produce ejecutando** el entrenamiento. La imagen es
+  el código; el artefacto es el resultado. Cambiar el modelo no exige reconstruir la imagen.
 
 ---
 
@@ -64,12 +69,13 @@ Ninguno reemplaza a otro:
 pinguinos/
 ├── src/penguins_ml/          ← el paquete: se instala DENTRO de las imágenes
 │   ├── config.py             ← lee y valida la config
-│   ├── data.py               ← carga desde S3
+│   ├── data.py               ← load_dataframe() (stub) + validate_schema()
 │   ├── transforms.py         ← build_pipeline(): compartido por train y serve
+│   ├── provenance.py         ← hashes, git, fingerprint y manifest
 │   ├── train.py              ← ENTRYPOINT de la imagen train
 │   └── serve.py              ← ENTRYPOINT de la imagen serve
 ├── configs/
-│   ├── train.toml            ← qué entrenar
+│   ├── base.toml             ← qué entrenar
 │   ├── local.toml            ← dónde, en tu laptop
 │   └── cloud.toml            ← dónde, en AWS
 ├── docker/
@@ -91,7 +97,96 @@ predice, y ambos importan `transforms.py`.
 
 ---
 
-## 4. Los tres viajes de un cambio
+## 4. El entrenamiento y su artefacto
+
+El CLI `python -m penguins_ml.train` corre en **cuatro fases**, y cada una falla antes
+de la siguiente:
+
+```mermaid
+flowchart LR
+    C["1. config<br/>TOML + overrides"] --> V["2. datos<br/>read_csv + validate_schema"]
+    V --> T["3. entrenamiento<br/>CV + fit final"]
+    T --> A["4. artefacto<br/>escritura atómica"]
+    C -.->|"exit 2"| X["falla"]
+    V -.->|"exit 1"| X
+    T -.->|"exit 1"| X
+```
+
+| Fase | Qué hace | Si falla |
+|---|---|---|
+| **1. Config** | `load_config(*paths)` + overrides de CLI | exit **2** (error de uso) |
+| **2. Datos** | `read_csv` + `validate_schema` + `folds ≤ clase minoritaria` | exit **1** |
+| **3. Entrenamiento** | `cross_validate` para métricas y después `fit` sobre todo el dataset | exit **1** |
+| **4. Artefacto** | escritura atómica en `artifacts/<run_id>/` | exit **1** |
+
+La salida es un **directorio**, no un archivo:
+
+```text
+artifacts/<run_id>/
+├── model.pkl        ← Pipeline completo (preprocesador + estimador)
+├── manifest.json    ← procedencia: de dónde salió
+└── cv.json          ← métricas por fold
+```
+
+### Por qué tres archivos
+
+| Archivo | Responde |
+|---|---|
+| `model.pkl` | "¿cómo predigo?" |
+| `cv.json` | "¿cómo rindió en cada fold?" |
+| `manifest.json` | "¿de dónde salió?" |
+
+El manifest es el **contrato de procedencia**:
+
+| Campo | Responde |
+|---|---|
+| `code.git_sha` / `git_dirty` | qué código lo produjo (y si había cambios sin commitear) |
+| `data.etag` / `rows` / `bytes` | sobre qué bytes exactos se entrenó |
+| `runtime` | con qué versiones de Python, sklearn y pandas |
+| `config` + `config_hash` | con qué receta exacta |
+| `config_sources` | qué capas de TOML se cargaron |
+| `overrides` | qué se pisó por CLI |
+| `cv` + `metrics` | cómo se evaluó |
+| `tracking_uri` | reservado para la Fase 4 (MLflow) |
+
+### La escritura es atómica
+
+El artefacto se escribe primero en `artifacts/.tmp-<uuid>/` y recién al final se renombra
+a `artifacts/<run_id>/`. Si el proceso muere a mitad, **no queda un artefacto parcial**:
+un `.pkl` truncado que parece válido es peor que ninguno.
+
+### Exit codes: el contrato con quien te lanza
+
+| Código | Significado | Quién lo usa |
+|---|---|---|
+| `0` | Artefacto completo | ECS marca la task exitosa |
+| `1` | Falla de ejecución | Reintentar o alertar |
+| `2` | Error de config/uso | No reintentar: el input está mal |
+
+En la nube nadie mira la pantalla: el **exit code** es la señal que usa ECS para decidir
+si el entrenamiento fue exitoso.
+
+### Corrida real
+
+```bash
+python -m penguins_ml.train \
+  --config configs/base.toml \
+  --config configs/local.toml
+```
+
+```text
+INFO artefacto: artifacts/2026-11-06T19-43-15Z
+INFO manifest: sha256:deb1b8cf...
+INFO accuracy: 0.9913 +- 0.0116
+INFO f1_macro: 0.9906 +- 0.0121
+```
+
+Que `accuracy` y `f1_macro` estén cerca no es casual: el dataset está moderadamente
+balanceado. Si divergieran, `f1_macro` sería la señal de que una clase se está perdiendo.
+
+---
+
+## 5. Los tres viajes de un cambio
 
 Saber **cuál** de estos tres flujos estás haciendo es la habilidad operativa central.
 
@@ -123,7 +218,7 @@ no producción.
 
 ---
 
-## 5. Cómo manipulas la infraestructura
+## 6. Cómo manipulas la infraestructura
 
 **No con clics. Con Python.**
 
@@ -153,7 +248,7 @@ antes de tocar la cuenta.
 
 ---
 
-## 6. Cómo se siente vivo
+## 7. Cómo se siente vivo
 
 "Vivo" no es una sensación. Son **señales verificables**:
 
@@ -170,7 +265,7 @@ en los logs, lo arreglas y se recupera**. Ahí entiendes que hay un sistema, no 
 
 ---
 
-## 7. Las seis preguntas del especialista
+## 8. Las seis preguntas del especialista
 
 No es saber más servicios. Es poder responder estas seis **sin abrir la consola**:
 
@@ -186,18 +281,18 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ---
 
-## 8. Estado del proyecto
+## 9. Estado del proyecto
 
-Actualizado al: **2026-11-03**
+Actualizado al: **2026-11-06**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
 | #1 Línea base | ✅ cerrado | `docs/` commiteado · MFA en usuario y root · budget $5/mes · `CDKToolkit` v32 |
 | #2 Bucket S3 | ✅ construido y destruido | Bucket privado, versionado, cifrado, `DESTROY` + `auto_delete_objects` · 3 tests · ciclo completo verificado **con un objeto dentro** |
 | #3 Paquete | ✅ cerrado | `penguins_ml` instalable · `pyproject.toml` con grupos `dev`/`infra` · `uv.lock` (40 paquetes) · config TOML validada con Pydantic · 8 tests |
-| #4 Pipeline + EDA | ⬜ siguiente | Incluye `notebooks/01_eda.ipynb`: tabla de decisiones que justifica la config y las transformaciones |
-| #5 Entrenamiento | ⬜ pendiente | — |
-| #6 Imágenes | ⬜ pendiente | — |
+| #4 Pipeline + EDA | ✅ cerrado | `ColumnTransformer` + `Pipeline` · `categorical` validada contra `features` · `validate_schema` · EDA con tabla de decisiones · 20 tests |
+| #5 Entrenamiento | ✅ cerrado | CLI en 4 fases · CV estratificada + `f1_macro` · `model.pkl` + `manifest.json` + `cv.json` · escritura atómica · exit codes `0/1/2` · 30 tests |
+| #6 Imágenes | ⬜ siguiente | Docker: base compartida + `train`/`serve`/`jupyter` |
 | #7 Streamlit local | ⬜ pendiente | — |
 | #8 S3 + sin keys | ⬜ pendiente | — |
 | #9 ECR | ⬜ pendiente | — |
@@ -232,7 +327,7 @@ flowchart LR
 
 ---
 
-## 9. Mapa acumulado
+## 10. Mapa acumulado
 
 Este diagrama crece con el proyecto. Cada cierre de issue agrega su bloque.
 
@@ -241,9 +336,10 @@ flowchart TB
     subgraph HOY["Construido"]
         BOOT["CDKToolkit<br/>(desplegado)"]
         S3["bucket S3 privado<br/>versionado · cifrado · destruible<br/>(verificado y destruido)"]
+        PKG["penguins_ml<br/>paquete + config + pipeline"]
+        TRN["CLI de entrenamiento<br/>model.pkl + manifest"]
     end
     subgraph DESPUES["Lo que viene"]
-        PKG["penguins_ml<br/>paquete"]
         IMG["imágenes<br/>train · serve · jupyter"]
         EC2["EC2 dev<br/>Jupyter + MLflow"]
         JOB["training job"]
@@ -251,22 +347,24 @@ flowchart TB
         OBS["CloudWatch + alarmas"]
         CI["CI/CD OIDC"]
     end
-    BOOT --> S3 --> PKG --> IMG --> EC2 --> JOB --> SRV --> OBS --> CI
+    BOOT --> S3 --> PKG --> TRN --> IMG --> EC2 --> JOB --> SRV --> OBS --> CI
 ```
 
 ---
 
-## 10. Registro de cambios
+## 11. Registro de cambios
 
 | Fecha | Cambio |
 |---|---|
 | 2026-11-03 | Creación del documento. Issue #1 en curso: bootstrap completado, budget creado, MFA activo. |
 | 2026-11-03 | Issue #1 cerrado. Issue #2 construido: bucket S3 privado, versionado, cifrado, con `DESTROY` + `auto_delete_objects`; 3 tests; ciclo deploy/destroy verificado con un objeto dentro. Se agrega la distinción construido ≠ desplegado. |
 | 2026-11-03 | Issue #3 cerrado: paquete `penguins_ml`, `pyproject` con grupos, `uv.lock`, config TOML validada y 8 tests. El EDA se integra como **paso 0 del issue #4**, no como issue aparte, para no fragmentar el trabajo. |
+| 2026-11-04 | Issue #4 cerrado: `ColumnTransformer` + `Pipeline`, `categorical` validada contra `features`, `validate_schema` y 20 tests. El EDA queda documentado en `notebooks/01_eda.ipynb`. |
+| 2026-11-06 | Issue #5 cerrado: CLI de entrenamiento en 4 fases, CV estratificada con `accuracy` + `f1_macro`, manifest de procedencia, `cv.json`, escritura atómica y exit codes `0/1/2`. Verificado con 30 tests y una corrida real (0.9913 ± 0.0116). |
 
 ---
 
-## 11. Referencias
+## 12. Referencias
 
 | Documento | Rol |
 |---|---|
