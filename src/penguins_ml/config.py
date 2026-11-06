@@ -21,7 +21,24 @@ class DataConfig(BaseModel):
     categorical: list[str] = []
 
     @model_validator(mode="after")
-    def _categorical_debe_estar_en_features(self) -> "DataConfig":
+    def _validar_columnas(self) -> "DataConfig":
+        """
+        Invariantes que solo dependen de la configuración, no del dataset
+        """
+        # No se especifican características    
+        if not self.features:
+            raise ValueError("features no puede estar vacío")
+
+        # Features duplicados
+        duplicados = sorted(f for f in set(self.features) if self.features.count(f) > 1)
+        if duplicados:
+            raise ValueError(f"Existen features duplicados: {duplicados}")
+
+        # Fuga de etiqueta para que el modelo no sea feature
+        if self.target in self.features:
+            raise ValueError(f"target {self.target!r} no puede estar en features")
+
+        # categorias no especificadas en features
         unknown = [c for c in self.categorical if c not in self.features]
         if unknown:
             raise ValueError(f"categorical contiene columnas ausentes en features: {unknown}")
@@ -36,11 +53,16 @@ class ModelConfig(BaseModel):
 class OutputConfig(BaseModel):
     uri: str = "artifacts/"
 
+class TrackingConfig(BaseModel):
+    uri: str = ""
+
 class TrainConfig(BaseModel):
     run: RunConfig = Field(default_factory=RunConfig)
     data: DataConfig
     model: ModelConfig = Field(default_factory=ModelConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """ Mezcla recursiva, las claves de override reemplazan a las de base, si son diccionarios se mezclan recursivamente"""
