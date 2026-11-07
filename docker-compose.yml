@@ -1,0 +1,9 @@
+services:
+  jupyter:
+    image: penguins/jupyter:local
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./data:/app/data:ro
+    working_dir: /app
