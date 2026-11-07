@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -111,6 +112,29 @@ def test_dataset_fingerprint_es_estable_y_cambia_con_el_contenido(tmp_path) -> N
     etag_b, _ = provenance.dataset_fingerprint(path)
     assert etag_a.startswith("sha256:")
     assert etag_a != etag_b
+
+
+def test_git_sha_usa_la_variable_de_entorno(monkeypatch) -> None:
+    monkeypatch.setenv("PENGUINS_GIT_SHA", "abc123")
+    assert provenance.git_sha() == "abc123"
+
+
+def test_git_sha_sin_variable_usa_git(monkeypatch) -> None:
+    monkeypatch.delenv("PENGUINS_GIT_SHA", raising=False)
+    sha = provenance.git_sha()
+    assert sha == "unknown" or re.fullmatch(r"[0-9a-f]{40}", sha)
+
+
+def test_git_dirty_usa_la_variable_de_entorno(monkeypatch) -> None:
+    monkeypatch.setenv("PENGUINS_GIT_DIRTY", "1")
+    assert provenance.git_dirty() is True
+    monkeypatch.setenv("PENGUINS_GIT_DIRTY", "0")
+    assert provenance.git_dirty() is False
+
+
+def test_git_dirty_sin_variable_usa_git(monkeypatch) -> None:
+    monkeypatch.delenv("PENGUINS_GIT_DIRTY", raising=False)
+    assert isinstance(provenance.git_dirty(), bool)
 
 
 # ── CLI de punta a punta ────────────────────────────────────────────────────

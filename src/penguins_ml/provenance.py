@@ -11,6 +11,7 @@ import json
 import pickle
 import platform
 import subprocess
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,15 +39,14 @@ def _git(*args: str)-> str:
     return completed.stdout.strip()
 
 def git_sha() -> str:
-    """
-    Devuelve el SHA del commit actual, o cadena vacía si no hay repo de git
-    """
-    return _git("rev-parse", "HEAD") or "unknown"
+    """Usa la variable de entorno inyectada en el build; si no, git."""
+    return os.getenv("PENGUINS_GIT_SHA") or _git("rev-parse", "HEAD") or "unknown"
 
 def git_dirty() -> bool:
-    """
-    Devuelve True si el directorio actual es un repo de git
-    """
+    """Usa la variable de entorno inyectada en el build; si no, git."""
+    env = os.getenv("PENGUINS_GIT_DIRTY")
+    if env is not None:
+        return env == "1"
     return bool(_git("status", "--porcelain"))
 
 def dataset_fingerprint(path: Path) -> tuple[str, int]:
