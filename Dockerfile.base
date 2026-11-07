@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim-bookworm
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+ARG GIT_SHA=unknown
+ARG GIT_DIRTY=0
+LABEL org.opencontainers.image.revision=${GIT_SHA}
+ENV PENGUINS_GIT_SHA=${GIT_SHA} \
+    PENGUINS_GIT_DIRTY=${GIT_DIRTY}
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /app \
+    && chown appuser:appuser /app
+
+WORKDIR /app
+
+COPY --chown=appuser:appuser pyproject.toml uv.lock ./
+USER appuser
+RUN --mount=type=cache,target=/home/appuser/.cache/uv,uid=1000 \
+    uv sync --locked --no-install-project --no-editable
+
+COPY --chown=appuser:appuser src ./src
+COPY --chown=appuser:appuser configs ./configs
+RUN --mount=type=cache,target=/home/appuser/.cache/uv,uid=1000 \
+    uv sync --locked --no-editable
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-c", "import penguins_ml; print(penguins_ml.__version__)"]
