@@ -7,3 +7,12 @@ services:
       - ./notebooks:/app/notebooks
       - ./data:/app/data:ro
     working_dir: /app
+
+  serve:
+    image: penguins/serve:local
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    environment:
+      PENGUINS_MODEL_URI: "" 
