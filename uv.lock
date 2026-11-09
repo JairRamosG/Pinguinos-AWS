@@ -2084,6 +2084,7 @@ dependencies = [
 dev = [
     { name = "matplotlib" },
     { name = "pytest" },
+    { name = "streamlit" },
 ]
 infra = [
     { name = "aws-cdk-lib" },
@@ -2107,6 +2108,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.2" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "streamlit", marker = "extra == 'dev'", specifier = ">=1.67.0" },
     { name = "streamlit", marker = "extra == 'serve'", specifier = ">=1.67.0" },
 ]
 provides-extras = ["infra", "dev", "serve", "jupyter"]
