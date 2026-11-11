@@ -3,9 +3,29 @@
 from __future__ import annotations
 
 import pandas as pd
+from penguins_ml import storage
 
 def load_dataframe(uri: str) -> pd.DataFrame:
-    raise NotImplementedError("Se implementa en el issue 8")
+    """
+    Carga un CSV desde una ruta local o desde `s3://bucket/clave`.
+
+    El resto del código no cambia: la config declara la URI y este módulo
+    decide cómo leerla.
+    """
+    if storage.is_s3(uri):
+        try:
+            with storage.open_read(uri) as fh:
+                return pd.read_csv(fh)
+        except storage.StorageError:
+            raise
+        except ValueError as exc:
+            raise storage.StorageError(f"CSV inválido en {uri}: {exc}") from exc
+    try:
+        return pd.read_csv(uri)
+    except OSError as exc:
+        raise storage.StorageError(f"No se pudo leer {uri}: {exc}") from exc
+    except ValueError as exc:
+        raise storage.StorageError(f"CSV inválido en {uri}: {exc}") from exc
 
 def validate_schema(df: pd.DataFrame, features: list[str], target:str) -> None:
     """
