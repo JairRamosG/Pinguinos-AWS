@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-07 · Fase actual: 1 (imágenes y contenedores)
+> Última actualización: 2026-11-10 · Fase actual: 1 (inferencia local completa)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -12,8 +12,8 @@ las piezas y cómo se mueve un cambio desde tu editor hasta la nube.
 ## Cómo usar este documento
 
 - Léelo antes de cada sesión de trabajo. Son 5 minutos y te devuelve el contexto.
-- Al cerrar un issue, se actualizan: la tabla de estado (§10), el mapa acumulado (§11) y
-  el registro de cambios (§12).
+- Al cerrar un issue, se actualizan: la tabla de estado (§11), el mapa acumulado (§12) y
+  el registro de cambios (§13).
 - Si algo de aquí contradice al código, **el código gana** y este documento se corrige.
 
 ---
@@ -73,7 +73,8 @@ pinguinos/
 │   ├── transforms.py         ← build_pipeline(): compartido por train y serve
 │   ├── provenance.py         ← hashes, git, fingerprint y manifest
 │   ├── train.py              ← ENTRYPOINT de la imagen train
-│   └── serve.py              ← ENTRYPOINT de la imagen serve (stub hasta #7)
+│   ├── serving.py            ← carga del artefacto y predicción (sin Streamlit)
+│   └── serve.py              ← ENTRYPOINT de la imagen serve: UI de Streamlit
 ├── configs/
 │   ├── base.toml             ← qué entrenar
 │   ├── local.toml            ← dónde, en tu laptop
@@ -85,7 +86,7 @@ pinguinos/
 │   └── jupyter.Dockerfile    ← FROM base + extras dev/jupyter + JupyterLab
 ├── scripts/
 │   └── build-images.sh       ← construye base -> train/serve/jupyter
-├── docker-compose.yml        ← levanta Jupyter local
+├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
 │   └── pinguinos_stack.py
@@ -287,7 +288,51 @@ docker compose up jupyter
 
 ---
 
-## 6. Los tres viajes de un cambio
+## 6. Cómo se sirve el modelo (inferencia)
+
+El ciclo local se cierra con `serve.py`: carga el artefacto **una vez** y devuelve
+predicciones.
+
+```mermaid
+flowchart LR
+    A["artifacts/<run_id>/"] -->|"streamlit run"| S["serve.py<br/>(Streamlit)"]
+    S -->|"predict_proba"| P["especie<br/>+ probabilidades"]
+```
+
+### De dónde sale el modelo
+
+Precedencia, de mayor a menor:
+
+1. `--model-uri` (argumento del script)
+2. `PENGUINS_MODEL_URI` (variable de entorno, inyectada por compose)
+3. el **último** artefacto de `artifacts/`
+
+El artefacto se monta `:ro`: la inferencia lo lee, pero **no puede modificarlo**.
+
+### Cómo se ejecuta
+
+```bash
+docker compose up serve          # http://localhost:8501
+# o sin contenedor
+uv run streamlit run src/penguins_ml/serve.py
+```
+
+### Las tres reglas de inferencia
+
+1. **Se carga una vez** (`@st.cache_resource`), no por cada petición.
+2. **Nunca reentrena ni escribe** el artefacto.
+3. **La UI muestra la versión** (`run_id`, `config_hash`, métricas) leída del
+   `manifest.json`: el usuario siempre sabe qué modelo está hablando.
+
+### Separación de lógica
+
+`serve.py` tiene la UI; `serving.py` tiene la carga y la predicción, sin importar
+Streamlit. Por eso los tests pueden probar la lógica sin levantar una sesión, y la
+UI se prueba con `AppTest`, el harness oficial de Streamlit.
+
+---
+
+## 7. Los tres viajes de un cambio
 
 Saber **cuál** de estos tres flujos estás haciendo es la habilidad operativa central.
 
@@ -319,7 +364,7 @@ no producción.
 
 ---
 
-## 7. Cómo manipulas la infraestructura
+## 8. Cómo manipulas la infraestructura
 
 **No con clics. Con Python.**
 
@@ -349,7 +394,7 @@ antes de tocar la cuenta.
 
 ---
 
-## 8. Cómo se siente vivo
+## 9. Cómo se siente vivo
 
 "Vivo" no es una sensación. Son **señales verificables**:
 
@@ -366,7 +411,7 @@ en los logs, lo arreglas y se recupera**. Ahí entiendes que hay un sistema, no 
 
 ---
 
-## 9. Las seis preguntas del especialista
+## 10. Las seis preguntas del especialista
 
 No es saber más servicios. Es poder responder estas seis **sin abrir la consola**:
 
@@ -382,9 +427,9 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ---
 
-## 10. Estado del proyecto
+## 11. Estado del proyecto
 
-Actualizado al: **2026-11-07**
+Actualizado al: **2026-11-10**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -394,8 +439,8 @@ Actualizado al: **2026-11-07**
 | #4 Pipeline + EDA | ✅ cerrado | `ColumnTransformer` + `Pipeline` · `categorical` validada contra `features` · `validate_schema` · EDA con tabla de decisiones · 20 tests |
 | #5 Entrenamiento | ✅ cerrado | CLI en 4 fases · CV estratificada + `f1_macro` · `model.pkl` + `manifest.json` + `cv.json` · escritura atómica · exit codes `0/1/2` · 30 tests |
 | #6 Imágenes | ✅ cerrado | `Dockerfile.base` + `train`/`serve`/`jupyter` · script de build · compose para Jupyter · no-root · sin datos · procedencia inyectada · 34 tests · 829 MB / 1.24 GB / 1.25 GB |
-| #7 Streamlit local | ⬜ siguiente | Completar `serve.py` y consumir el artefacto real |
-| #8 S3 + sin keys | ⬜ pendiente | — |
+| #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
+| #8 S3 + sin keys | ⬜ siguiente | — |
 | #9 ECR | ⬜ pendiente | — |
 | #10 EC2 dev | ⬜ pendiente | — |
 | #11 Jupyter | ⬜ pendiente | — |
@@ -428,7 +473,7 @@ flowchart LR
 
 ---
 
-## 11. Mapa acumulado
+## 12. Mapa acumulado
 
 Este diagrama crece con el proyecto. Cada cierre de issue agrega su bloque.
 
@@ -440,6 +485,7 @@ flowchart TB
         PKG["penguins_ml<br/>paquete + config + pipeline"]
         TRN["CLI de entrenamiento<br/>model.pkl + manifest"]
         IMG["imágenes<br/>base · train · serve · jupyter"]
+        UI["inferencia local<br/>Streamlit + compose"]
     end
     subgraph DESPUES["Lo que viene"]
         EC2["EC2 dev<br/>Jupyter + MLflow"]
@@ -448,12 +494,12 @@ flowchart TB
         OBS["CloudWatch + alarmas"]
         CI["CI/CD OIDC"]
     end
-    BOOT --> S3 --> PKG --> TRN --> IMG --> EC2 --> JOB --> SRV --> OBS --> CI
+    BOOT --> S3 --> PKG --> TRN --> IMG --> UI --> EC2 --> JOB --> SRV --> OBS --> CI
 ```
 
 ---
 
-## 12. Registro de cambios
+## 13. Registro de cambios
 
 | Fecha | Cambio |
 |---|---|
@@ -463,10 +509,11 @@ flowchart TB
 | 2026-11-04 | Issue #4 cerrado: `ColumnTransformer` + `Pipeline`, `categorical` validada contra `features`, `validate_schema` y 20 tests. El EDA queda documentado en `notebooks/01_eda.ipynb`. |
 | 2026-11-06 | Issue #5 cerrado: CLI de entrenamiento en 4 fases, CV estratificada con `accuracy` + `f1_macro`, manifest de procedencia, `cv.json`, escritura atómica y exit codes `0/1/2`. Verificado con 30 tests y una corrida real (0.9913 ± 0.0116). |
 | 2026-11-07 | Issue #6 cerrado: `Dockerfile.base` + imágenes `train`/`serve`/`jupyter`, `.dockerignore`, script de build y compose para Jupyter. Corre como `appuser`, no contiene datos y la procedencia se inyecta por `--build-arg` (el `git_sha` ya no es `unknown`). Medido: 829 MB / 829 MB / 1.24 GB / 1.25 GB. Se agrega el capítulo §5. |
+| 2026-11-10 | Issue #7 cerrado: `serving.py` (lógica de carga y predicción, testeable sin Streamlit) + `serve.py` (UI), servicio `serve` en compose con montaje `:ro`, precedencia `--model-uri` > `PENGUINS_MODEL_URI` > último artefacto. 12 tests nuevos con `AppTest`; suite en 46. Se agrega el capítulo §6: el ciclo local queda completo (train → artefacto → UI). |
 
 ---
 
-## 13. Referencias
+## 14. Referencias
 
 | Documento | Rol |
 |---|---|
