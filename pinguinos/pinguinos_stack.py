@@ -15,6 +15,7 @@ class PinguinosStack(Stack):
         bucket = s3.Bucket(
             self,
             "DataBucket",
+            bucket_name = f"pinguinos-{self.account}",
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
