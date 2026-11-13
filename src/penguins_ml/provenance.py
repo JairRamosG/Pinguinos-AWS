@@ -21,6 +21,8 @@ import sklearn
 
 from penguins_ml.config import TrainConfig
 
+from penguins_ml import storage
+
 _CHUNK = 64 * 1026
 
 def _git(*args: str)-> str:
@@ -49,13 +51,15 @@ def git_dirty() -> bool:
         return env == "1"
     return bool(_git("status", "--porcelain"))
 
-def dataset_fingerprint(path: Path) -> tuple[str, int]:
+def dataset_fingerprint(uri: str | Path) -> tuple[str, int]:
     """
     SHA-256 del contenido y el tamaño en bytes, en streaming
+
+    Soporta rutas locales y 's3://', resolviendo con modulo storage
     """
     digest = hashlib.sha256()
     size = 0
-    with open(path, "rb") as f:
+    with storage.open_read(str(uri)) as f:
         while chunk := f.read(_CHUNK):
             digest.update(chunk)
             size += len(chunk)
