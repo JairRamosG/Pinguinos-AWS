@@ -17,6 +17,7 @@ infra = [
 ]
 dev = [
     "matplotlib>=3.11.2",
+    "moto[s3]>=5.2.5",
     "pytest==8.4.2",
     "streamlit>=1.67.0",
 ]
