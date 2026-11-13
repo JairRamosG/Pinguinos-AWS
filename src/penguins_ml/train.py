@@ -19,10 +19,11 @@ import pandas as pd
 from pydantic import ValidationError
 from sklearn.model_selection import StratifiedKFold, cross_validate
 
-from penguins_ml import provenance
+from penguins_ml import provenance, storage
 from penguins_ml.config import TrainConfig, load_config
-from penguins_ml.data import validate_schema
+from penguins_ml.data import validate_schema, load_dataframe
 from penguins_ml.transforms import build_pipeline
+
 
 log = logging.getLogger("penguins_ml.train")
 
@@ -158,6 +159,28 @@ def _write_artifact(
         raise
     return final
 
+def _publish_artifact(
+    output_uri: str,
+    run: str,
+    pipeline: Any,
+    manifest: dict[str, Any],
+    cv_payload: dict[str, Any],
+) -> str:
+    """
+    Escribe el artefacto en un staging local y lo sube a S3.
+
+    El manifest va el último: si aparece en S3, el artefacto está completo.
+    """
+    staging = Path(tempfile.mkdtemp(prefix=".stage-"))
+    try:
+        local_dir = _write_artifact(staging, run, pipeline, manifest, cv_payload)
+        base = output_uri.rstrip("/")
+        for name in ("model.pkl", "cv.json", "manifest.json"):
+            storage.write_bytes(f"{base}/{run}/{name}", (local_dir / name).read_bytes())
+        return f"{base}/{run}/"
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level = logging.INFO,
@@ -178,11 +201,11 @@ def main(argv: list[str] | None = None) -> int:
     # Fase 2: datos
     features, target = config.data.features, config.data.target
     try:
-        df = pd.read_csv(config.data.uri)
+        df = load_dataframe(config.data.uri)
         validate_schema(df, features, target)
         _validate_folds(df[target], config.run.folds)
         etag, size_bytes = provenance.dataset_fingerprint(config.data.uri)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, storage.StorageError) as exc:
         log.error(f"Datos no validos: {exc}")
         return 1
 
@@ -226,15 +249,26 @@ def main(argv: list[str] | None = None) -> int:
         metrics = metrics
     )
 
+    output_uri = str(config.output.uri)
     try:
-        final = _write_artifact(
-            Path(config.output.uri),
-            run,
-            pipeline,
-            manifest, 
-            cv_payload
-        )
-    except (OSError, ValueError) as exc:
+        if storage.is_s3(output_uri):
+            final = _publish_artifact(
+                output_uri,
+                run, 
+                pipeline, 
+                manifest, 
+                cv_payload
+            )            
+
+        else:
+            final = _write_artifact(
+                Path(config.output.uri),
+                run,
+                pipeline,
+                manifest, 
+                cv_payload
+            )
+    except (OSError, ValueError, storage.StorageError) as exc:
         log.error(f"No se pudo escribir el artefacto: {exc}")
         return 1
 
