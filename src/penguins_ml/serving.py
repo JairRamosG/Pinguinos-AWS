@@ -4,15 +4,21 @@ porque permite testear sin levantar una sesión.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import pickle
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from penguins_ml import storage
+from penguins_ml.storage import StorageError
 
 log = logging.getLogger("penguins_ml.serving")
 
@@ -69,6 +75,32 @@ def latest_artifact(artifacts_root: str | Path = "artifacts") -> Path:
         raise ArtifactError(f"No hay artefactos en {root}. Entrená primero.")
     return runs[0]
 
+def _materialize_s3(uri: str) -> Path:
+    """
+    Descarga `model.pkl` y `manifest.json` de S3 a un directorio temporal.
+
+    Si `uri` termina en `/`, se toma el artefacto más reciente del prefijo.
+    El directorio temporal se borra al salir del proceso.
+    """
+    if uri.endswith("/"):
+        runs = storage.list_dirs(uri)
+        if not runs:
+            raise ArtifactError(f"No hay artefactos en {uri}")
+        uri = runs[0]
+
+    prefix = (
+        uri[: -len(MODEL)].rstrip("/") if uri.endswith(MODEL) else uri.rstrip("/")
+    )
+    dest = Path(tempfile.mkdtemp(prefix=".artifact-"))
+    atexit.register(shutil.rmtree, dest, ignore_errors=True)
+    try:
+        for name in (MODEL, MANIFEST):
+            (dest / name).write_bytes(storage.read_bytes(f"{prefix}/{name}"))
+    except StorageError as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise ArtifactError(str(exc)) from exc
+    return dest
+
 
 def resolve_model_dir(
     model_uri: str | None = None,
@@ -79,11 +111,15 @@ def resolve_model_dir(
     if not uri:
         return latest_artifact(artifacts_root)
 
+    if storage.is_s3(uri):
+        return _materialize_s3(uri)
+
     path = Path(uri)
     if path.is_dir():
         return path
     if path.name == MODEL:
         return path.parent
+
     raise ArtifactError(
         f"{MODEL_URI_ENV} debe apuntar a un directorio de artefacto o a {MODEL}: {path}"
     )
@@ -142,3 +178,4 @@ def predict(artifact: Artifact, values: dict[str, Any]) -> tuple[str, dict[str, 
     probabilities = {label: float(p) for label, p in zip(classes, raw)}
     species = max(probabilities, key=probabilities.__getitem__)
     return species, probabilities
+
