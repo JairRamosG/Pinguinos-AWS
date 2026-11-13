@@ -14,5 +14,6 @@ services:
       - "127.0.0.1:8501:8501"
     volumes:
       - ./artifacts:/app/artifacts:ro
+      - ~/.aws:/home/appuser/.aws:ro
     environment:
       PENGUINS_MODEL_URI: ${PENGUINS_MODEL_URI:-} 
