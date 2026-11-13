@@ -317,6 +317,21 @@ docker compose up serve          # http://localhost:8501
 uv run streamlit run src/penguins_ml/serve.py
 ```
 
+### Servir desde S3
+
+`PENGUINS_MODEL_URI` también acepta URIs `s3://`:
+
+```bash
+PENGUINS_MODEL_URI=s3://pinguinos-792440910424/models/ docker compose up serve
+```
+
+- Con barra final (`models/`), lista los prefijos y toma el run más reciente.
+- Sin barra, o terminada en `model.pkl`, usa ese run exacto.
+- El contenedor monta `~/.aws:ro`. Si el token SSO caduca, `aws sso login` en el host
+  y reiniciar el contenedor.
+- `serving._materialize_s3` descarga `model.pkl` y `manifest.json` a un directorio
+  temporal; la lógica local de carga no cambia.
+
 ### Las tres reglas de inferencia
 
 1. **Se carga una vez** (`@st.cache_resource`), no por cada petición.
@@ -429,7 +444,7 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ## 11. Estado del proyecto
 
-Actualizado al: **2026-11-10**
+Actualizado al: **2026-11-13**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -440,7 +455,7 @@ Actualizado al: **2026-11-10**
 | #5 Entrenamiento | ✅ cerrado | CLI en 4 fases · CV estratificada + `f1_macro` · `model.pkl` + `manifest.json` + `cv.json` · escritura atómica · exit codes `0/1/2` · 30 tests |
 | #6 Imágenes | ✅ cerrado | `Dockerfile.base` + `train`/`serve`/`jupyter` · script de build · compose para Jupyter · no-root · sin datos · procedencia inyectada · 34 tests · 829 MB / 1.24 GB / 1.25 GB |
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
-| #8 S3 + sin keys | ⬜ siguiente | — |
+| #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
 | #9 ECR | ⬜ pendiente | — |
 | #10 EC2 dev | ⬜ pendiente | — |
 | #11 Jupyter | ⬜ pendiente | — |
@@ -483,9 +498,9 @@ flowchart TB
         BOOT["CDKToolkit<br/>(desplegado)"]
         S3["bucket S3 privado<br/>versionado · cifrado · destruible<br/>(verificado y destruido)"]
         PKG["penguins_ml<br/>paquete + config + pipeline"]
-        TRN["CLI de entrenamiento<br/>model.pkl + manifest"]
+        TRN["CLI de entrenamiento<br/>local o S3 · model.pkl + manifest"]
         IMG["imágenes<br/>base · train · serve · jupyter"]
-        UI["inferencia local<br/>Streamlit + compose"]
+        UI["inferencia local o desde S3<br/>Streamlit + compose"]
     end
     subgraph DESPUES["Lo que viene"]
         EC2["EC2 dev<br/>Jupyter + MLflow"]
@@ -510,6 +525,7 @@ flowchart TB
 | 2026-11-06 | Issue #5 cerrado: CLI de entrenamiento en 4 fases, CV estratificada con `accuracy` + `f1_macro`, manifest de procedencia, `cv.json`, escritura atómica y exit codes `0/1/2`. Verificado con 30 tests y una corrida real (0.9913 ± 0.0116). |
 | 2026-11-07 | Issue #6 cerrado: `Dockerfile.base` + imágenes `train`/`serve`/`jupyter`, `.dockerignore`, script de build y compose para Jupyter. Corre como `appuser`, no contiene datos y la procedencia se inyecta por `--build-arg` (el `git_sha` ya no es `unknown`). Medido: 829 MB / 829 MB / 1.24 GB / 1.25 GB. Se agrega el capítulo §5. |
 | 2026-11-10 | Issue #7 cerrado: `serving.py` (lógica de carga y predicción, testeable sin Streamlit) + `serve.py` (UI), servicio `serve` en compose con montaje `:ro`, precedencia `--model-uri` > `PENGUINS_MODEL_URI` > último artefacto. 12 tests nuevos con `AppTest`; suite en 46. Se agrega el capítulo §6: el ciclo local queda completo (train → artefacto → UI). |
+| 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
 
 ---
 
