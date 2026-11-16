@@ -496,7 +496,7 @@ Actualizado al: **2026-11-15**
 | #6 Imágenes | ✅ cerrado | `Dockerfile.base` + `train`/`serve`/`jupyter` · script de build · compose para Jupyter · no-root · sin datos · procedencia inyectada · 34 tests · 829 MB / 1.24 GB / 1.25 GB |
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
 | #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
-| #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 6 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
+| #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
 | #10 EC2 dev | ⬜ pendiente | — |
 | #11 Jupyter | ⬜ pendiente | — |
 | #12 MLflow | ⬜ pendiente | — |
@@ -567,7 +567,7 @@ flowchart TB
 | 2026-11-07 | Issue #6 cerrado: `Dockerfile.base` + imágenes `train`/`serve`/`jupyter`, `.dockerignore`, script de build y compose para Jupyter. Corre como `appuser`, no contiene datos y la procedencia se inyecta por `--build-arg` (el `git_sha` ya no es `unknown`). Medido: 829 MB / 829 MB / 1.24 GB / 1.25 GB. Se agrega el capítulo §5. |
 | 2026-11-10 | Issue #7 cerrado: `serving.py` (lógica de carga y predicción, testeable sin Streamlit) + `serve.py` (UI), servicio `serve` en compose con montaje `:ro`, precedencia `--model-uri` > `PENGUINS_MODEL_URI` > último artefacto. 12 tests nuevos con `AppTest`; suite en 46. Se agrega el capítulo §6: el ciclo local queda completo (train → artefacto → UI). |
 | 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
-| 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 6 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
+| 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
 
 ---
 
