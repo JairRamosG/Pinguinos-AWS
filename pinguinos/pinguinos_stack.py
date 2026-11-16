@@ -1,5 +1,6 @@
 from aws_cdk import (
     CfnOutput,
+    Duration,
     RemovalPolicy,
     Stack,
     Tags,
@@ -34,7 +35,7 @@ class PinguinosStack(Stack):
             repo = ecr.Repository(
                 self,
                 f"{image.capitalize()}Repository",
-                repository_name = f"pinguinos/{image}"
+                repository_name = f"pinguinos/{image}",
                 image_scan_on_push=True,
                 lifecycle_rules=[
                     ecr.LifecycleRule(
