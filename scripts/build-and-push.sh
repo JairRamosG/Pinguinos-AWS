@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === AISLAMIENTO DE CREDENCIALES ===
+# Crea un directorio temporal limpio exclusivo para este script de ejecución
+DOCKER_CONFIG="$(mktemp -d)"
+export DOCKER_CONFIG
+# Asegura que al salir (exitoso o con error), la carpeta temporal se destruya
+trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+
 # Perfil SSO del proyecto. Podés sobreescribirlo:
 #   AWS_PROFILE=otro ./scripts/build-and-push.sh
 export AWS_PROFILE="${AWS_PROFILE:-mi-asus}"
