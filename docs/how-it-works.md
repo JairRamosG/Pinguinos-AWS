@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-10 · Fase actual: 1 (inferencia local completa)
+> Última actualización: 2026-11-15 · Fase actual: 1 (inferencia local completa)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -85,7 +85,8 @@ pinguinos/
 │   ├── serve.Dockerfile      ← FROM base + extra serve + Streamlit
 │   └── jupyter.Dockerfile    ← FROM base + extras dev/jupyter + JupyterLab
 ├── scripts/
-│   └── build-images.sh       ← construye base -> train/serve/jupyter
+│   ├── build-images.sh       ← construye base -> train/serve/jupyter
+│   └── build-and-push.sh     ← publica en ECR con credenciales temporales
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
@@ -213,6 +214,7 @@ flowchart LR
 | `docker/jupyter.Dockerfile` | `FROM base` + extras `dev`/`jupyter` + JupyterLab |
 | `.dockerignore` | qué **no** entra al contexto de build |
 | `scripts/build-images.sh` | construye las cuatro en orden |
+| `scripts/build-and-push.sh` | construye con SHA y publica `train`/`serve`/`jupyter` en ECR |
 | `docker-compose.yml` | levanta Jupyter local |
 
 ### El orden es obligatorio
@@ -224,6 +226,44 @@ flowchart LR
 Las derivadas empiezan con `FROM penguins/base:local`. Si la base no existe, fallan con
 `pull access denied`. Y si reconstruís la base, las derivadas **no** se actualizan solas:
 son fotos, no referencias vivas.
+
+### Publicar en ECR (`build-and-push.sh`)
+
+`build-and-push.sh` es el camino de publicación. No reconstruye lógica: reutiliza
+`build-images.sh` con el SHA corto y empuja las tres imágenes.
+
+```bash
+./scripts/build-and-push.sh
+```
+
+Usa el perfil SSO `mi-asus` por defecto; `AWS_PROFILE=otro` lo sobreescribe.
+
+1. Exige el árbol de git limpio: el tag debe identificar exactamente un commit.
+2. Resuelve la cuenta con `aws sts get-caller-identity` y arma el registro
+   `<cuenta>.dkr.ecr.us-east-1.amazonaws.com`.
+3. Obtiene un token con `aws ecr get-login-password` y hace `docker login`.
+4. Construye `penguins/{train,serve,jupyter}:<SHA>` con `build-images.sh`.
+5. Etiqueta y empuja a `pinguinos/{train,serve,jupyter}:<SHA>`.
+6. Verifica que el label `org.opencontainers.image.revision` sea el SHA completo.
+
+| Local | ECR |
+|---|---|
+| `penguins/train:<SHA>` | `pinguinos/train:<SHA>` |
+| `penguins/serve:<SHA>` | `pinguinos/serve:<SHA>` |
+| `penguins/jupyter:<SHA>` | `pinguinos/jupyter:<SHA>` |
+
+#### Credenciales aisladas
+
+El script crea un `DOCKER_CONFIG` temporal con `mktemp -d`, lo exporta y lo borra con
+`trap ... EXIT`. `docker login` y `docker push` usan ese directorio, no
+`~/.docker/config.json`. Por eso no depende de `credsStore: desktop`, de `pass` ni de
+ningún credential helper local. El token de ECR queda en el directorio temporal (0700)
+y desaparece al terminar; si Docker avisa que lo guarda sin cifrar, es esperado.
+
+La infraestructura ECR vive en CDK: tres repositorios `pinguinos/train`,
+`pinguinos/serve` y `pinguinos/jupyter`, con escaneo al push, lifecycle para imágenes
+untagged a 14 días y `RemovalPolicy.DESTROY` + `empty_on_delete=True`. Los tests de CDK
+cubren los tres repos, los nombres, el escaneo, el lifecycle y el borrado.
 
 ### Qué entra y qué no
 
@@ -284,7 +324,7 @@ docker compose up jupyter
 
 1. Corre como `appuser` (uid 1000), **no root**.
 2. **No contiene datos ni credenciales.**
-3. En CI/ECR el tag es el SHA (`#9`); en desarrollo, `local`.
+3. En ECR el tag es el SHA corto (`build-and-push.sh`); en desarrollo, `local`.
 
 ---
 
@@ -316,6 +356,21 @@ docker compose up serve          # http://localhost:8501
 # o sin contenedor
 uv run streamlit run src/penguins_ml/serve.py
 ```
+
+### Servir desde S3
+
+`PENGUINS_MODEL_URI` también acepta URIs `s3://`:
+
+```bash
+PENGUINS_MODEL_URI=s3://pinguinos-792440910424/models/ docker compose up serve
+```
+
+- Con barra final (`models/`), lista los prefijos y toma el run más reciente.
+- Sin barra, o terminada en `model.pkl`, usa ese run exacto.
+- El contenedor monta `~/.aws:ro`. Si el token SSO caduca, `aws sso login` en el host
+  y reiniciar el contenedor.
+- `serving._materialize_s3` descarga `model.pkl` y `manifest.json` a un directorio
+  temporal; la lógica local de carga no cambia.
 
 ### Las tres reglas de inferencia
 
@@ -429,7 +484,7 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ## 11. Estado del proyecto
 
-Actualizado al: **2026-11-10**
+Actualizado al: **2026-11-15**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -440,8 +495,8 @@ Actualizado al: **2026-11-10**
 | #5 Entrenamiento | ✅ cerrado | CLI en 4 fases · CV estratificada + `f1_macro` · `model.pkl` + `manifest.json` + `cv.json` · escritura atómica · exit codes `0/1/2` · 30 tests |
 | #6 Imágenes | ✅ cerrado | `Dockerfile.base` + `train`/`serve`/`jupyter` · script de build · compose para Jupyter · no-root · sin datos · procedencia inyectada · 34 tests · 829 MB / 1.24 GB / 1.25 GB |
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
-| #8 S3 + sin keys | ⬜ siguiente | — |
-| #9 ECR | ⬜ pendiente | — |
+| #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
+| #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
 | #10 EC2 dev | ⬜ pendiente | — |
 | #11 Jupyter | ⬜ pendiente | — |
 | #12 MLflow | ⬜ pendiente | — |
@@ -483,9 +538,10 @@ flowchart TB
         BOOT["CDKToolkit<br/>(desplegado)"]
         S3["bucket S3 privado<br/>versionado · cifrado · destruible<br/>(verificado y destruido)"]
         PKG["penguins_ml<br/>paquete + config + pipeline"]
-        TRN["CLI de entrenamiento<br/>model.pkl + manifest"]
+        TRN["CLI de entrenamiento<br/>local o S3 · model.pkl + manifest"]
         IMG["imágenes<br/>base · train · serve · jupyter"]
-        UI["inferencia local<br/>Streamlit + compose"]
+        UI["inferencia local o desde S3<br/>Streamlit + compose"]
+        ECR["ECR<br/>pinguinos/train · serve · jupyter<br/>scan + lifecycle 14d"]
     end
     subgraph DESPUES["Lo que viene"]
         EC2["EC2 dev<br/>Jupyter + MLflow"]
@@ -494,7 +550,7 @@ flowchart TB
         OBS["CloudWatch + alarmas"]
         CI["CI/CD OIDC"]
     end
-    BOOT --> S3 --> PKG --> TRN --> IMG --> UI --> EC2 --> JOB --> SRV --> OBS --> CI
+    BOOT --> S3 --> PKG --> TRN --> IMG --> UI --> ECR --> EC2 --> JOB --> SRV --> OBS --> CI
 ```
 
 ---
@@ -510,6 +566,8 @@ flowchart TB
 | 2026-11-06 | Issue #5 cerrado: CLI de entrenamiento en 4 fases, CV estratificada con `accuracy` + `f1_macro`, manifest de procedencia, `cv.json`, escritura atómica y exit codes `0/1/2`. Verificado con 30 tests y una corrida real (0.9913 ± 0.0116). |
 | 2026-11-07 | Issue #6 cerrado: `Dockerfile.base` + imágenes `train`/`serve`/`jupyter`, `.dockerignore`, script de build y compose para Jupyter. Corre como `appuser`, no contiene datos y la procedencia se inyecta por `--build-arg` (el `git_sha` ya no es `unknown`). Medido: 829 MB / 829 MB / 1.24 GB / 1.25 GB. Se agrega el capítulo §5. |
 | 2026-11-10 | Issue #7 cerrado: `serving.py` (lógica de carga y predicción, testeable sin Streamlit) + `serve.py` (UI), servicio `serve` en compose con montaje `:ro`, precedencia `--model-uri` > `PENGUINS_MODEL_URI` > último artefacto. 12 tests nuevos con `AppTest`; suite en 46. Se agrega el capítulo §6: el ciclo local queda completo (train → artefacto → UI). |
+| 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
+| 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
 
 ---
 

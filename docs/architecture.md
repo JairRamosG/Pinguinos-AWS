@@ -83,7 +83,7 @@ flowchart TD
     subgraph AWS["Cuenta AWS"]
         S3D[("S3: datos<br/>raw/ + processed/")]
         S3M[("S3: modelos<br/>versionado + manifest")]
-        ECR["ECR<br/>imagen train / imagen serve"]
+        ECR["ECR<br/>imágenes train / serve / jupyter"]
         TR["Cómputo de entrenamiento<br/>EC2 / tarea ECS / Batch"]
         INF["Cómputo de inferencia<br/>Fargate + Streamlit"]
         CW["CloudWatch Logs"]
@@ -231,29 +231,34 @@ significa que no lo está.
 **Otra pieza que falta:** `docker build` produce una imagen, pero una imagen no vive en ningún
 lado hasta que se sube a un registro. En AWS ese registro es **ECR**.
 
-Dos imágenes desde un solo paquete:
+Tres imágenes desde un solo paquete:
 
 | Imagen | Contenido | Por qué separarlas |
 |---|---|---|
 | `train` | pandas, scikit-learn, boto3, el paquete | Pesada, corre minutos, luego muere |
 | `serve` | streamlit, scikit-learn, boto3, el paquete | Más chica = arranque en frío más rápido |
+| `jupyter` | base + `jupyterlab` | Entorno de exploración; no es una task de producción |
 
 ```mermaid
 flowchart LR
     REPO["commit de git (SHA 4f2a9c1)"] --> B1["build train.Dockerfile"]
     REPO --> B2["build serve.Dockerfile"]
+    REPO --> B3["build jupyter.Dockerfile"]
     B1 --> ECR1["ECR: pinguinos/train:4f2a9c1"]
     B2 --> ECR2["ECR: pinguinos/serve:4f2a9c1"]
+    B3 --> ECR3["ECR: pinguinos/jupyter:4f2a9c1"]
     ECR1 --> RUN1["la tarea de entrenamiento descarga :4f2a9c1"]
     ECR2 --> RUN2["la tarea de inferencia descarga :4f2a9c1"]
+    ECR3 --> RUN3["EC2 dev descarga :4f2a9c1"]
 ```
 
 Reglas:
 
 - **Etiqueta con el SHA de git.** Nunca `latest` en un despliegue. `latest` hace imposible el
   rollback y no deja rastro de auditoría.
-- El mismo SHA debe etiquetar ambas imágenes, para que puedas probar qué código entrenó el
-  modelo y qué código lo sirve.
+- El mismo SHA debe etiquetar las tres imágenes, para que puedas probar qué código entrenó el
+  modelo, qué código lo sirve y qué entorno usaste para explorar.
+- La imagen `base` no se publica: es un intermedio de build.
 - `image_scan_on_push=True` en el repositorio — señal de vulnerabilidades gratis.
 - Regla de ciclo de vida: expira imágenes sin etiqueta a los 14 días. El almacenamiento en ECR es
   barato, no gratis.
@@ -505,7 +510,7 @@ flowchart LR
     PR["Pull request"] --> T1["pytest (unit)"]
     T1 --> T2["cdk synth + cdk diff"]
     T2 --> M["merge a main"]
-    M --> B["construye ambas imágenes, tag = SHA"]
+    M --> B["construye las tres imágenes, tag = SHA"]
     B --> P["push a ECR"]
     P --> D["cdk deploy"]
 ```
@@ -610,7 +615,7 @@ Cada fase es desplegable y destruible de forma independiente. No te saltes ningu
 
 ### Fase 2 — ECR y entrenamiento containerizado
 
-- Dos Dockerfiles, etiquetados por SHA, subidos a ECR.
+- Tres Dockerfiles (`train`, `serve`, `jupyter`), etiquetados por SHA, subidos a ECR.
 - El entrenamiento corre como `RunTask` de ECS (o en una EC2 manual la primera semana).
 - Task role de IAM acotado a lectura de `raw/*` y escritura de `models/*`.
 - **Salida:** sin SSH; una corrida se inicia desde el CLI y produce un manifest.
