@@ -186,13 +186,8 @@ class PinguinosStack(Stack):
             apply_only_at_cron_interval= True,
             schedule_expression = STOP_SCHEDULE_UTC,
             automation_target_parameter_name = "InstanceId",
-            targets = [
-                {
-                    "key"   : "InstanceIds",
-                    "values": [dev_instance.instance_id] 
-                }
-            ],
             parameters = {
+                "InstanceId": [dev_instance.instance_id],
                 "AutomationAssumeRole": [stop_role.role_arn]
             }
         )
