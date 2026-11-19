@@ -95,24 +95,30 @@ def _instancia(template: assertions.Template) -> dict:
     assert len(instances) == 1, f"Se esperaba una EC2, hay {len(instances)}"
     return next(iter(instances.values()))
 
-def _rol_para(template: assertions.Template, servicio: str) -> dict:
-    for role in template.find_resources("AWS::IAM::Role").values():
+def _rol_para(template: assertions.Template, servicio: str) -> tuple[str, dict]:
+    for logical_id, role in template.find_resources("AWS::IAM::Role").items():
         trust = json.dumps(role["Properties"]["AssumeRolePolicyDocument"])
         if servicio in trust:
-            return role
+            return logical_id, role
     raise AssertionError(f"No hay rol asumible por {servicio}")
 
-def test_hay_una_ec2_t3_micro():
-    template = _template()
-    template.resource_count_is("AWS::EC2::Instance", 1)
-    assert _instancia(template)["Properties"]["InstanceType"] == "t3.micro"
 
-def _rol_para(template: assertions.Template, servicio: str) -> dict:
-    for role in template.find_resources("AWS::IAM::Role").values():
-        trust = json.dumps(role["Properties"]["AssumeRolePolicyDocument"])
-        if servicio in trust:
-            return role
-    raise AssertionError(f"No hay rol asumible por {servicio}")
+def _statements_del_rol(template: assertions.Template, servicio: str) -> list[dict]:
+    """Junta los statements inline y los de las políticas adjuntas.
+
+    `Role.add_to_policy()` no escribe `Policies` dentro del rol: crea un
+    `AWS::IAM::Policy` aparte con `Roles: [{Ref: <rol>}]`. Buscar solo en
+    `Properties.Policies` del rol deja fuera justamente esos permisos.
+    """
+    logical_id, role = _rol_para(template, servicio)
+    statements: list[dict] = []
+    for policy in role["Properties"].get("Policies", []):
+        statements.extend(policy["PolicyDocument"]["Statement"])
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        attached = policy["Properties"].get("Roles", [])
+        if {"Ref": logical_id} in attached:
+            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
+    return statements
 
 
 def test_hay_una_ec2_t3_micro():
@@ -154,13 +160,13 @@ def test_security_group_sin_reglas_de_entrada():
 
 def test_rol_de_instancia_con_ssm():
     template = _template()
-    role = _rol_para(template, "ec2.amazonaws.com")
+    _, role = _rol_para(template, "ec2.amazonaws.com")
     assert "AmazonSSMManagedInstanceCore" in json.dumps(role["Properties"])
 
 
 def test_rol_s3_acotado_por_prefijo():
     template = _template()
-    policies = json.dumps(_rol_para(template, "ec2.amazonaws.com")["Properties"]["Policies"])
+    policies = json.dumps(_statements_del_rol(template, "ec2.amazonaws.com"))
     assert "s3:GetObject" in policies
     assert "s3:PutObject" in policies
     assert "data/raw/*" in policies
@@ -180,16 +186,20 @@ def test_auto_stop_nocturno():
     assert len(associations) == 1
     props = next(iter(associations.values()))["Properties"]
     assert props["Name"] == "AWS-StopEC2Instance"
-    assert props["ScheduleExpression"] == "cron(0 3 * * ? *)"
+    assert props["ScheduleExpression"] == "cron(0 5 * * ? *)"
     assert props["ApplyOnlyAtCronInterval"] is True
     assert props["AutomationTargetParameterName"] == "InstanceId"
-    assert props["Targets"][0]["Key"] == "InstanceIds"
+    target = props["Targets"][0]
+    assert target["Key"] == "ParameterValues"
+    assert len(target["Values"]) == 1
+    assert "DevInstance" in target["Values"][0]["Ref"]
     assert "AutomationAssumeRole" in props["Parameters"]
+    assert "InstanceId" not in props["Parameters"]
 
 
 def test_el_rol_de_parada_solo_detiene_instancias():
     template = _template()
-    policies = json.dumps(_rol_para(template, "ssm.amazonaws.com")["Properties"]["Policies"])
+    policies = json.dumps(_statements_del_rol(template, "ssm.amazonaws.com"))
     assert "ec2:StopInstances" in policies
     assert "instance/*" in policies
 
