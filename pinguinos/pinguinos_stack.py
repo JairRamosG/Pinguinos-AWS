@@ -91,7 +91,7 @@ class PinguinosStack(Stack):
             description = "Instance Profile de la EC2 de desarrollo (SSM + S3 por prefijo)",
             managed_policies = [
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonSSMManagesInstanceCore"
+                    "AmazonSSMManagedInstanceCore"
                 )
             ]
         )
