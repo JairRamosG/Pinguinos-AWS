@@ -181,15 +181,20 @@ class PinguinosStack(Stack):
         ssm.CfnAssociation(
             self,
             "DevNightlyStop",
-            name = "AWS-StopEC2Instance",
-            association_name = "pinguinos-dev-nightly-stop",
-            apply_only_at_cron_interval= True,
-            schedule_expression = STOP_SCHEDULE_UTC,
-            automation_target_parameter_name = "InstanceId",
-            parameters = {
-                "InstanceId": [dev_instance.instance_id],
-                "AutomationAssumeRole": [stop_role.role_arn]
-            }
+            name="AWS-StopEC2Instance",
+            association_name="pinguinos-dev-nightly-stop",
+            apply_only_at_cron_interval=True,
+            schedule_expression="cron(0 5 * * ? *)",
+            automation_target_parameter_name="InstanceId",
+            targets=[
+                {
+                    "key": "ParameterValues",
+                    "values": [dev_instance.instance_id],
+                }
+            ],
+            parameters={
+                "AutomationAssumeRole": [stop_role.role_arn],
+            },
         )
         CfnOutput(
             self,
