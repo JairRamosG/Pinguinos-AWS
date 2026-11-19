@@ -2,13 +2,26 @@ import json
 
 import aws_cdk as core
 import aws_cdk.assertions as assertions
+from aws_cdk import aws_ec2 as ec2
 
 from pinguinos.pinguinos_stack import PinguinosStack
 
 
 def _template() -> assertions.Template:
     app = core.App()
-    stack = PinguinosStack(app, "pinguinos")
+
+    network = core.Stack(app, "network")
+    vpc = ec2.Vpc(
+        network,
+        "TestVpc",
+        max_azs=2,
+        nat_gateways=0,
+        subnet_configuration=[
+            ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC)
+        ],
+    )
+
+    stack = PinguinosStack(app, "pinguinos", vpc = vpc)
     return assertions.Template.from_stack(stack)
 
 
@@ -28,7 +41,6 @@ def test_bucket_privado_y_versionado():
             "RestrictPublicBuckets": True,
         },
     })
-
 
 def test_bucket_se_borra_con_el_stack():
     template = _template()
@@ -76,3 +88,120 @@ def test_los_repositorios_se_borran_con_el_stack():
     for repo in template.find_resources("AWS::ECR::Repository").values():
         assert repo["DeletionPolicy"] == "Delete"
         assert repo["UpdateReplacePolicy"] == "Delete"
+
+
+def _instancia(template: assertions.Template) -> dict:
+    instances = template.find_resources("AWS::EC2::Instance")
+    assert len(instances) == 1, f"Se esperaba una EC2, hay {len(instances)}"
+    return next(iter(instances.values()))
+
+def _rol_para(template: assertions.Template, servicio: str) -> dict:
+    for role in template.find_resources("AWS::IAM::Role").values():
+        trust = json.dumps(role["Properties"]["AssumeRolePolicyDocument"])
+        if servicio in trust:
+            return role
+    raise AssertionError(f"No hay rol asumible por {servicio}")
+
+def test_hay_una_ec2_t3_micro():
+    template = _template()
+    template.resource_count_is("AWS::EC2::Instance", 1)
+    assert _instancia(template)["Properties"]["InstanceType"] == "t3.micro"
+
+def _rol_para(template: assertions.Template, servicio: str) -> dict:
+    for role in template.find_resources("AWS::IAM::Role").values():
+        trust = json.dumps(role["Properties"]["AssumeRolePolicyDocument"])
+        if servicio in trust:
+            return role
+    raise AssertionError(f"No hay rol asumible por {servicio}")
+
+
+def test_hay_una_ec2_t3_micro():
+    template = _template()
+    template.resource_count_is("AWS::EC2::Instance", 1)
+    assert _instancia(template)["Properties"]["InstanceType"] == "t3.micro"
+
+
+def test_ec2_sin_keypair():
+    template = _template()
+    assert "KeyName" not in _instancia(template)["Properties"]
+
+
+def test_ec2_exige_imdsv2():
+    template = _template()
+    metadata = _instancia(template)["Properties"]["MetadataOptions"]
+    assert metadata["HttpTokens"] == "required"
+    assert metadata["HttpPutResponseHopLimit"] == 1
+
+
+def test_disco_raiz_30_gb_gp3_cifrado_y_se_borra_con_la_instancia():
+    template = _template()
+    mapping = _instancia(template)["Properties"]["BlockDeviceMappings"][0]
+    assert mapping["DeviceName"] == "/dev/xvda"
+    ebs = mapping["Ebs"]
+    assert ebs["VolumeSize"] == 30
+    assert ebs["VolumeType"] == "gp3"
+    assert ebs["Encrypted"] is True
+    assert ebs["DeleteOnTermination"] is True
+
+
+def test_security_group_sin_reglas_de_entrada():
+    template = _template()
+    template.resource_count_is("AWS::EC2::SecurityGroupIngress", 0)
+    sgs = template.find_resources("AWS::EC2::SecurityGroup")
+    assert len(sgs) == 1
+    assert "SecurityGroupIngress" not in next(iter(sgs.values()))["Properties"]
+
+
+def test_rol_de_instancia_con_ssm():
+    template = _template()
+    role = _rol_para(template, "ec2.amazonaws.com")
+    assert "AmazonSSMManagedInstanceCore" in json.dumps(role["Properties"])
+
+
+def test_rol_s3_acotado_por_prefijo():
+    template = _template()
+    policies = json.dumps(_rol_para(template, "ec2.amazonaws.com")["Properties"]["Policies"])
+    assert "s3:GetObject" in policies
+    assert "s3:PutObject" in policies
+    assert "data/raw/*" in policies
+    assert "models/*" in policies
+    assert '"Resource": "*"' not in policies
+
+
+def test_la_instancia_tiene_instance_profile():
+    template = _template()
+    template.resource_count_is("AWS::IAM::InstanceProfile", 1)
+    assert "IamInstanceProfile" in _instancia(template)["Properties"]
+
+
+def test_auto_stop_nocturno():
+    template = _template()
+    associations = template.find_resources("AWS::SSM::Association")
+    assert len(associations) == 1
+    props = next(iter(associations.values()))["Properties"]
+    assert props["Name"] == "AWS-StopEC2Instance"
+    assert props["ScheduleExpression"] == "cron(0 3 * * ? *)"
+    assert props["ApplyOnlyAtCronInterval"] is True
+    assert props["AutomationTargetParameterName"] == "InstanceId"
+    assert props["Targets"][0]["Key"] == "InstanceIds"
+    assert "AutomationAssumeRole" in props["Parameters"]
+
+
+def test_el_rol_de_parada_solo_detiene_instancias():
+    template = _template()
+    policies = json.dumps(_rol_para(template, "ssm.amazonaws.com")["Properties"]["Policies"])
+    assert "ec2:StopInstances" in policies
+    assert "instance/*" in policies
+
+
+def test_la_instancia_lleva_los_tags_del_proyecto():
+    template = _template()
+    tags = {t["Key"]: t["Value"] for t in _instancia(template)["Properties"]["Tags"]}
+    assert tags["project"] == "pinguinos"
+    assert tags["env"] == "dev"
+    assert tags["owner"] == "jair"
+
+
+def test_exporta_el_id_de_la_instancia():
+    template = _template()
+    assert "DevInstanceId" in json.dumps(template.find_outputs("*"))
