@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-15 · Fase actual: 1 (inferencia local completa)
+> Última actualización: 2026-11-18 · Fase actual: 4 (EC2 de desarrollo)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -90,7 +90,7 @@ pinguinos/
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
-│   └── pinguinos_stack.py
+│   └── pinguinos_stack.py    ← bucket, ECR, EC2, IAM y auto-stop
 ├── notebooks/                ← NUNCA se despliega
 └── tests/
 ```
@@ -447,6 +447,68 @@ lo que declaras y lo que existe.
 Ciclo diario de infraestructura: `editar → synth → diff → deploy`. El `diff` es tu revisión
 antes de tocar la cuenta.
 
+### La máquina de desarrollo
+
+Desde el issue #10 el stack también declara **una** EC2. No es un servidor de producción: es
+el lugar donde después viven Jupyter (#11) y MLflow (#12).
+
+| Pieza | Decisión | Por qué |
+|---|---|---|
+| Tipo | `t3.micro` (2 vCPU burstable, 1 GiB) | El dataset no pide cómputo; el límite real es RAM. `t3.nano` no alcanza para Jupyter |
+| Disco | EBS `gp3` 30 GB cifrado, `delete_on_termination` | Sobrevive al `stop`; se va con la instancia en el `terminate` |
+| Red | Subred pública + IP pública, **sin reglas de entrada** | Necesita salida (ECR, S3, SSM), no necesita recibir nada |
+| Identidad | Instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo | Ni access keys ni SSH: el rol lo entrega el instance profile |
+| Metadata | IMDSv2 obligatorio (`http_tokens=REQUIRED`, hop limit 1) | Sin el token de sesión, nadie lee credenciales del metadata |
+| Acceso | SSM Session Manager | La conexión la abre el agente **desde dentro**; no hay puerto escuchando |
+| Apagado | Asociación `AWS-StopEC2Instance`, cron `0 5 * * ? *` | 05:00 UTC = 00:00 en Bogotá; `apply_only_at_cron_interval` evita corridas extra |
+
+La VPC se **inyecta**: el stack recibe `vpc` opcional y, si no llega, resuelve la default con
+`Vpc.from_lookup`. Eso es lo que permite testear sin credenciales ni red: los tests le pasan
+una VPC de juguete.
+
+Para entrar:
+
+```bash
+# el ID sale del output DevInstanceId de `cdk deploy`
+aws ssm start-session --target i-xxxxxxxxxxxxxxxxx
+```
+
+### El auto-stop es una asociación, no un cron del sistema
+
+No hay `cron` dentro de la instancia. Hay un recurso de SSM que, a las 05:00 UTC, ejecuta el
+runbook `AWS-StopEC2Instance` con el ID de la instancia:
+
+```text
+Schedule de SSM (cron) → Association → Automation (AWS-StopEC2Instance) → ec2:StopInstances
+```
+
+Hay **dos roles distintos**, y confundirlos es el error clásico:
+
+- **Rol de instancia** (`ec2.amazonaws.com`): deja que el *agente SSM de la instancia* hable con
+  SSM y lea S3.
+- **Rol de Automation** (`ssm.amazonaws.com`): deja que *SSM* ejecute `StopInstances`. Sin él la
+  asociación existe, pero falla al ejecutar.
+
+Y una restricción de la API que cuesta un deploy: `AutomationTargetParameterName` y `Targets`
+van **juntos o no van**. Para runbooks de Automation el target se declara con
+`Key=ParameterValues` (`InstanceIds` es de Run Command). El ID **no** va en `Parameters`: va en
+`Targets`, y el nombre del parámetro del runbook que lo recibe va en
+`AutomationTargetParameterName`.
+
+### Cuánto cuesta tenerla apagada
+
+Apagada no es gratis: el disco y la IP pública siguen existiendo.
+
+| Concepto | Apagada | Encendida 8 h/día |
+|---|---|---|
+| Cómputo `t3.micro` | $0 | ~$2.50/mes |
+| EBS `gp3` 30 GB | ~$2.40/mes | ~$2.40/mes |
+| IPv4 pública | ~$3.65/mes | ~$3.65/mes |
+| **Total** | **~$6.05/mes** | **~$8.55/mes** |
+
+La lección: el auto-stop protege el cómputo, no el resto. A este tamaño, los costos fijos pesan
+más que las horas de máquina.
+
 ---
 
 ## 9. Cómo se siente vivo
@@ -484,7 +546,7 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ## 11. Estado del proyecto
 
-Actualizado al: **2026-11-15**
+Actualizado al: **2026-11-18**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -497,7 +559,7 @@ Actualizado al: **2026-11-15**
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
 | #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
 | #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
-| #10 EC2 dev | ⬜ pendiente | — |
+| #10 EC2 dev | ✅ construido | `t3.micro` AL2023 en subred pública, sin ingress · EBS `gp3` 30 GB cifrado · IMDSv2 · instance profile con SSM + S3 por prefijo · auto-stop 05:00 UTC con `AWS-StopEC2Instance` · VPC inyectable · 12 tests de CDK · el primer deploy falló en la asociación SSM y se corrigió con `ParameterValues` |
 | #11 Jupyter | ⬜ pendiente | — |
 | #12 MLflow | ⬜ pendiente | — |
 | #13 Training job | ⬜ pendiente | — |
@@ -523,7 +585,7 @@ flowchart LR
         TK["CDKToolkit<br/>bucket de assets · 5 roles · SSM v32"]
         BUD["Budget Pinguinos-Mensual<br/>$5/mes · alerta 80%"]
     end
-    NADA["Sin recursos de aplicación desplegados<br/>(el bucket S3 se destruyó tras verificarlo)"]
+    NADA["Al 2026-11-18, sin recursos de aplicación desplegados<br/>(el stack EC2 dev está construido y aún no se despliega)"]
 ```
 
 ---
@@ -542,15 +604,17 @@ flowchart TB
         IMG["imágenes<br/>base · train · serve · jupyter"]
         UI["inferencia local o desde S3<br/>Streamlit + compose"]
         ECR["ECR<br/>pinguinos/train · serve · jupyter<br/>scan + lifecycle 14d"]
+        EC2["EC2 dev<br/>t3.micro · EBS 30 GB · SSM · auto-stop"]
     end
     subgraph DESPUES["Lo que viene"]
-        EC2["EC2 dev<br/>Jupyter + MLflow"]
+        JUP["Jupyter en la EC2"]
+        MLF["MLflow"]
         JOB["training job"]
         SRV["Fargate serve"]
         OBS["CloudWatch + alarmas"]
         CI["CI/CD OIDC"]
     end
-    BOOT --> S3 --> PKG --> TRN --> IMG --> UI --> ECR --> EC2 --> JOB --> SRV --> OBS --> CI
+    BOOT --> S3 --> PKG --> TRN --> IMG --> UI --> ECR --> EC2 --> JUP --> MLF --> JOB --> SRV --> OBS --> CI
 ```
 
 ---
@@ -568,6 +632,7 @@ flowchart TB
 | 2026-11-10 | Issue #7 cerrado: `serving.py` (lógica de carga y predicción, testeable sin Streamlit) + `serve.py` (UI), servicio `serve` en compose con montaje `:ro`, precedencia `--model-uri` > `PENGUINS_MODEL_URI` > último artefacto. 12 tests nuevos con `AppTest`; suite en 46. Se agrega el capítulo §6: el ciclo local queda completo (train → artefacto → UI). |
 | 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
 | 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
+| 2026-11-18 | Issue #10 construido: EC2 `t3.micro` (AL2023) en subred pública sin reglas de entrada, EBS `gp3` 30 GB cifrado, IMDSv2, instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo, y auto-stop con la asociación `AWS-StopEC2Instance` a las 05:00 UTC. La VPC se inyecta para poder testear sin red; 12 tests de CDK. El primer deploy falló porque SSM exige `Targets` junto a `AutomationTargetParameterName` y, para runbooks de Automation, la key es `ParameterValues`; CloudFormation revirtió el create y el stack no queda en la cuenta. Se agrega §8 "La máquina de desarrollo". |
 
 ---
 
