@@ -136,7 +136,7 @@ def test_ec2_exige_imdsv2():
     template = _template()
     metadata = _instancia(template)["Properties"]["MetadataOptions"]
     assert metadata["HttpTokens"] == "required"
-    assert metadata["HttpPutResponseHopLimit"] == 1
+    assert metadata["HttpPutResponseHopLimit"] == 2
 
 
 def test_disco_raiz_30_gb_gp3_cifrado_y_se_borra_con_la_instancia():
@@ -215,3 +215,25 @@ def test_la_instancia_lleva_los_tags_del_proyecto():
 def test_exporta_el_id_de_la_instancia():
     template = _template()
     assert "DevInstanceId" in json.dumps(template.find_outputs("*"))
+
+def test_rol_s3_acotado_por_prefijo():
+    template = _template()
+    statements = _statements_del_rol(template, "ec2.amazonaws.com")
+    s3 = [s for s in statements if "s3:" in json.dumps(s.get("Action", ""))]
+    policies = json.dumps(s3)
+    assert "s3:GetObject" in policies
+    assert "s3:PutObject" in policies
+    assert "data/raw/*" in policies
+    assert "models/*" in policies
+    assert '"Resource": "*"' not in policies
+
+def test_rol_puede_descargar_la_imagen_de_jupyter():
+    template = _template()
+    statements = _statements_del_rol(template, "ec2.amazonaws.com")
+    pull = next(s for s in statements if s.get("Sid") == "PullJupyterImage")
+    assert set(pull["Action"]) == {
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+    }
+    assert "repository/pinguinos/jupyter" in json.dumps(pull["Resource"])
