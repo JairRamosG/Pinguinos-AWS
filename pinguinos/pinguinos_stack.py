@@ -45,6 +45,7 @@ class PinguinosStack(Stack):
             value=bucket.bucket_name)
         
         # --- Repositorios para las imágenes --- 
+        repos: dict[str, ecr.Repository] = {}
         for image in ("train", "serve", "jupyter"):
             repo = ecr.Repository(
                 self,
@@ -61,6 +62,7 @@ class PinguinosStack(Stack):
                 removal_policy=RemovalPolicy.DESTROY,
                 empty_on_delete=True
             )
+            repos[image] = repo 
             CfnOutput(
                 self, 
                 f"{image.capitalize()}RepositoryUri",
@@ -83,7 +85,7 @@ class PinguinosStack(Stack):
             allow_all_outbound = True
         )
 
-        # --- Roles de InstancePrile para la instancia EC2 hacie el bucket --- 
+        # --- Roles de InstanceProfile para la instancia EC2 hacie el bucket --- 
         dev_role = iam.Role(
             self,
             "DevInstanceRole",
@@ -123,6 +125,26 @@ class PinguinosStack(Stack):
             )
         )
 
+        dev_role.add_to_policy(
+            iam.PolicyStatement(
+                sid = "EcrAuthToken",
+                actions = ["ecr:GetAuthorizationToken"],
+                resources = ["*"]
+            )
+        )
+
+        dev_role.add_to_policy(
+            iam.PolicyStatement(
+                sid = "PullJupyterImage",
+                actions = [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                ],
+                resources = [repos["jupyter"].repository_arn]
+            )
+        )
+
         # --- Instancia de desarrollo ---
         dev_instance = ec2.Instance(
             self,
@@ -135,7 +157,7 @@ class PinguinosStack(Stack):
             security_group=dev_sg,
             associate_public_ip_address=True,
             http_tokens=ec2.HttpTokens.REQUIRED,
-            http_put_response_hop_limit=1,
+            http_put_response_hop_limit=2,
             propagate_tags_to_volume_on_creation=True,
             block_devices=[
                 ec2.BlockDevice(
