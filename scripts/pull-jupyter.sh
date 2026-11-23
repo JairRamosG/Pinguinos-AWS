@@ -1,3 +1,4 @@
+cat > ~/pull-jupyter.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -25,3 +26,5 @@ LABEL="$(docker image inspect "$IMAGE" \
 echo "tag:      $TAG"
 echo "revision: $LABEL"
 [[ "$LABEL" == "$TAG"* ]] || { echo "ERROR: el tag no corresponde a la revisión" >&2; exit 1; }
+EOF
+chmod +x ~/pull-jupyter.sh
