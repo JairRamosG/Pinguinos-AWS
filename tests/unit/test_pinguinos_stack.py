@@ -236,4 +236,12 @@ def test_rol_puede_descargar_la_imagen_de_jupyter():
         "ecr:GetDownloadUrlForLayer",
         "ecr:BatchGetImage",
     }
-    assert "repository/pinguinos/jupyter" in json.dumps(pull["Resource"])
+
+    resource = pull["Resource"]
+    assert isinstance(resource, dict)
+    logical_id, attribute = resource["Fn::GetAtt"]
+    assert attribute == "Arn"
+
+    repos = template.find_resources("AWS::ECR::Repository")
+    assert logical_id in repos
+    assert repos[logical_id]["Properties"]["RepositoryName"] == "pinguinos/jupyter"
