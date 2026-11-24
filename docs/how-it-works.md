@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-18 · Fase actual: 4 (EC2 de desarrollo)
+> Última actualización: 2026-11-24 · Fase actual: 4 (EC2 de desarrollo)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -86,7 +86,8 @@ pinguinos/
 │   └── jupyter.Dockerfile    ← FROM base + extras dev/jupyter + JupyterLab
 ├── scripts/
 │   ├── build-images.sh       ← construye base -> train/serve/jupyter
-│   └── build-and-push.sh     ← publica en ECR con credenciales temporales
+│   ├── build-and-push.sh     ← publica en ECR con credenciales temporales
+│   └── pull-jupyter.sh       ← en la EC2: login, pull y verificación del label
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
@@ -450,7 +451,7 @@ antes de tocar la cuenta.
 ### La máquina de desarrollo
 
 Desde el issue #10 el stack también declara **una** EC2. No es un servidor de producción: es
-el lugar donde después viven Jupyter (#11) y MLflow (#12).
+el lugar donde ya vive Jupyter (#11) y donde después vivirá MLflow (#12).
 
 | Pieza | Decisión | Por qué |
 |---|---|---|
@@ -458,8 +459,8 @@ el lugar donde después viven Jupyter (#11) y MLflow (#12).
 | Disco | EBS `gp3` 30 GB cifrado, `delete_on_termination` | Sobrevive al `stop`; se va con la instancia en el `terminate` |
 | Red | Subred pública + IP pública, **sin reglas de entrada** | Necesita salida (ECR, S3, SSM), no necesita recibir nada |
 | Identidad | Instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo | Ni access keys ni SSH: el rol lo entrega el instance profile |
-| Metadata | IMDSv2 obligatorio (`http_tokens=REQUIRED`, hop limit 1) | Sin el token de sesión, nadie lee credenciales del metadata |
-| Acceso | SSM Session Manager | La conexión la abre el agente **desde dentro**; no hay puerto escuchando |
+| Metadata | IMDSv2 obligatorio (`http_tokens=REQUIRED`, hop limit 2) | Con hop limit 1 el contenedor no llega al metadata: cruza el bridge de Docker y boto3 se queda sin credenciales |
+| Acceso | SSM Session Manager · port forwarding para Jupyter | La conexión la abre el agente **desde dentro**; no hay puerto escuchando en la IP pública |
 | Apagado | Asociación `AWS-StopEC2Instance`, cron `0 5 * * ? *` | 05:00 UTC = 00:00 en Bogotá; `apply_only_at_cron_interval` evita corridas extra |
 
 La VPC se **inyecta**: el stack recibe `vpc` opcional y, si no llega, resuelve la default con
@@ -472,6 +473,75 @@ Para entrar:
 # el ID sale del output DevInstanceId de `cdk deploy`
 aws ssm start-session --target i-xxxxxxxxxxxxxxxxx
 ```
+
+### Jupyter vive en un contenedor, no en el host
+
+La EC2 no tiene JupyterLab instalado. Corre la imagen que ya está en ECR:
+
+```bash
+docker run -d --name jupyter --restart unless-stopped \
+  -p 127.0.0.1:8888:8888 \
+  -v /srv/pinguinos/notebooks:/app/notebooks \
+  -v /srv/pinguinos/data:/app/data \
+  <cuenta>.dkr.ecr.us-east-1.amazonaws.com/pinguinos/jupyter:<SHA>
+```
+
+`-p 127.0.0.1:8888:8888` es la decisión que importa: el contenedor escucha en `8888`, pero el
+host solo lo publica en loopback. Ni siquiera la IP pública de la instancia lo alcanza.
+
+No hace falta que lo alcance: entrás por un túnel que viaja dentro de la sesión SSM.
+
+```bash
+aws ssm start-session --target <DevInstanceId> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8888"],"localPortNumber":["8888"]}'
+# http://localhost:8888
+```
+
+No se abre ninguna regla de ingress. El tráfico va cifrado y autenticado por SSM, y no queda
+un puerto olvidado en el security group.
+
+#### De dónde sale la imagen
+
+La instancia no tiene access keys: el instance profile firma el `get-login-password` y el
+`pull`. El rol tiene los permisos mínimos, y solo sobre el repositorio de Jupyter:
+
+| Acción | Recurso |
+|---|---|
+| `ecr:GetAuthorizationToken` | `*` |
+| `ecr:BatchCheckLayerAvailability` | repo `pinguinos/jupyter` |
+| `ecr:GetDownloadUrlForLayer` | repo `pinguinos/jupyter` |
+| `ecr:BatchGetImage` | repo `pinguinos/jupyter` |
+
+`GetAuthorizationToken` no acepta ARN de repositorio: ese `*` es de la API, no un atajo. Por
+eso el test de S3 filtra por acciones `s3:` en lugar de prohibir `*` en todo el rol.
+
+`scripts/pull-jupyter.sh` hace login, pull y verifica que el label
+`org.opencontainers.image.revision` corresponda al tag. El tag es el commit, no `latest`.
+
+#### El estado vive en el EBS
+
+| Qué | Dónde | Sobrevive a `stop` | Sobrevive a `terminate` |
+|---|---|---|---|
+| Notebooks | `/srv/pinguinos/notebooks` (EBS) | Sí | No |
+| Datos de trabajo | `/srv/pinguinos/data` (EBS) | Sí | No |
+| Imagen | ECR | Sí | Sí |
+| Código | GitHub | Sí | Sí |
+
+**El EBS es copia de trabajo, no respaldo.** Si terminás la instancia, los notebooks se van con
+ella. Y el notebook que escribís en la instancia no aparece solo en git: hay que traerlo.
+
+#### Apagar la máquina no es matar Jupyter
+
+`--restart unless-stopped` más `systemctl enable docker` hacen que, al arrancar la instancia,
+Docker levante y devuelva el contenedor. El auto-stop de las 05:00 UTC se lo lleva junto con la
+máquina, y al día siguiente vuelve solo.
+
+El detalle está en el nombre: `unless-stopped` no revive el contenedor si **vos** lo detuviste a
+mano. Es deliberado: distingue "se apagó la máquina" de "lo paré yo".
+
+Con 1 GiB, Jupyter arranca pero el kernel de pandas queda al límite. Por eso el host tiene un
+swapfile de 2 GB: no es rendimiento, es no despertarse con el OOM killer.
 
 ### El auto-stop es una asociación, no un cron del sistema
 
@@ -507,7 +577,8 @@ Apagada no es gratis: el disco y la IP pública siguen existiendo.
 | **Total** | **~$6.05/mes** | **~$8.55/mes** |
 
 La lección: el auto-stop protege el cómputo, no el resto. A este tamaño, los costos fijos pesan
-más que las horas de máquina.
+más que las horas de máquina. Jupyter no agrega un peso propio: es la misma instancia, ya
+contada.
 
 ---
 
@@ -518,6 +589,7 @@ más que las horas de máquina.
 | Señal | Cómo la ves |
 |---|---|
 | El servicio responde | `curl http://<ip>:8501/_stcore/health` → `ok` |
+| Jupyter está arriba | por el túnel: `curl -s http://localhost:8888/api` devuelve la versión |
 | Alguien usó el modelo | una línea en CloudWatch con `"event":"prediction"` |
 | La versión correcta sirve | el log dice `modelo <ts> cargado` |
 | El pipeline produjo algo nuevo | el manifest en S3 cambió de timestamp |
@@ -546,7 +618,7 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ## 11. Estado del proyecto
 
-Actualizado al: **2026-11-18**
+Actualizado al: **2026-11-24**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -559,8 +631,8 @@ Actualizado al: **2026-11-18**
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
 | #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
 | #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
-| #10 EC2 dev | ✅ construido | `t3.micro` AL2023 en subred pública, sin ingress · EBS `gp3` 30 GB cifrado · IMDSv2 · instance profile con SSM + S3 por prefijo · auto-stop 05:00 UTC con `AWS-StopEC2Instance` · VPC inyectable · 12 tests de CDK · el primer deploy falló en la asociación SSM y se corrigió con `ParameterValues` |
-| #11 Jupyter | ⬜ pendiente | — |
+| #10 EC2 dev | ✅ construido y verificado | `t3.micro` AL2023 en subred pública, sin ingress · EBS `gp3` 30 GB cifrado · IMDSv2 · instance profile con SSM + S3 por prefijo · auto-stop 05:00 UTC con `AWS-StopEC2Instance` · VPC inyectable · 12 tests de CDK · el primer deploy falló en la asociación SSM y se corrigió con `ParameterValues`; el deploy real se hizo al construir #11 |
+| #11 Jupyter | ✅ construido | Contenedor `pinguinos/jupyter:<SHA>` sobre la EC2 · `-p 127.0.0.1:8888` + túnel `AWS-StartPortForwardingSession` · bind mounts en `/srv/pinguinos` · `--restart unless-stopped` + Docker habilitado · swap 2 GB · hop limit 2 · permisos ECR acotados al repo · `scripts/pull-jupyter.sh` · pull, túnel y notebook contra S3 verificados en la instancia · 22 tests de CDK |
 | #12 MLflow | ⬜ pendiente | — |
 | #13 Training job | ⬜ pendiente | — |
 | #14 Fargate serve | ⬜ pendiente | — |
@@ -585,7 +657,7 @@ flowchart LR
         TK["CDKToolkit<br/>bucket de assets · 5 roles · SSM v32"]
         BUD["Budget Pinguinos-Mensual<br/>$5/mes · alerta 80%"]
     end
-    NADA["Al 2026-11-18, sin recursos de aplicación desplegados<br/>(el stack EC2 dev está construido y aún no se despliega)"]
+    EST["Al 2026-11-24: la EC2 dev se desplegó para verificar #11<br/>(pull · túnel · notebook). El proyecto destruye al terminar:<br/>consultá la cuenta antes de asumir que sigue ahí"]
 ```
 
 ---
@@ -605,9 +677,9 @@ flowchart TB
         UI["inferencia local o desde S3<br/>Streamlit + compose"]
         ECR["ECR<br/>pinguinos/train · serve · jupyter<br/>scan + lifecycle 14d"]
         EC2["EC2 dev<br/>t3.micro · EBS 30 GB · SSM · auto-stop"]
+        JUP["Jupyter sobre la EC2<br/>contenedor · loopback + túnel SSM<br/>EBS como copia de trabajo"]
     end
     subgraph DESPUES["Lo que viene"]
-        JUP["Jupyter en la EC2"]
         MLF["MLflow"]
         JOB["training job"]
         SRV["Fargate serve"]
@@ -633,6 +705,7 @@ flowchart TB
 | 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
 | 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
 | 2026-11-18 | Issue #10 construido: EC2 `t3.micro` (AL2023) en subred pública sin reglas de entrada, EBS `gp3` 30 GB cifrado, IMDSv2, instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo, y auto-stop con la asociación `AWS-StopEC2Instance` a las 05:00 UTC. La VPC se inyecta para poder testear sin red; 12 tests de CDK. El primer deploy falló porque SSM exige `Targets` junto a `AutomationTargetParameterName` y, para runbooks de Automation, la key es `ParameterValues`; CloudFormation revirtió el create y el stack no queda en la cuenta. Se agrega §8 "La máquina de desarrollo". |
+| 2026-11-24 | Issue #11 construido: JupyterLab corre en un contenedor sobre la EC2, publicado solo en loopback y alcanzado por un túnel SSM (`AWS-StartPortForwardingSession`); bind mounts en `/srv/pinguinos`, `--restart unless-stopped`, Docker habilitado y swap de 2 GB. El hop limit sube a 2 porque el contenedor cruza el bridge de Docker y con 1 no llegaba al IMDS. El rol recibe los permisos mínimos de ECR acotados al repo de Jupyter, y el test de S3 pasa a filtrar por acciones `s3:` porque `GetAuthorizationToken` exige `*`. `scripts/pull-jupyter.sh` automatiza login, pull y verificación del label de revisión. Verificado en la instancia: pull, túnel y notebook contra S3. 22 tests de CDK. Se agrega §8 "Jupyter vive en un contenedor". |
 
 ---
 

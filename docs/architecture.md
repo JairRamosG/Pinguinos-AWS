@@ -5,7 +5,9 @@
 > **forma del pipeline**, no el modelo. Cada componente de abajo se transfiere sin cambios a un
 > dataset mil veces más grande.
 
-Estado: documento de diseño. Nada de esto está implementado todavía.
+Estado: diseño vivo. La línea base, S3, ECR con el entrenamiento containerizado y una EC2 de
+desarrollo con SSM ya están construidos; Fargate, observabilidad y CI/CD siguen en la hoja de
+ruta de §7. Cuando este documento contradice al código, gana el código.
 
 ---
 
@@ -149,21 +151,29 @@ días) o por equipo. Aquí no hace falta — pero conoce que esa separación exi
 
 ### 4.2 Entorno de notebooks
 
-**Esta es una pieza que falta en el plan original.** Los notebooks necesitan cómputo; la
+**Esta pieza no estaba en el plan original.** Los notebooks necesitan cómputo; la
 pregunta es dónde vive.
 
 | Opción | Costo | Valor de aprendizaje | Veredicto |
 |---|---|---|---|
 | Jupyter local + `boto3`/`s3fs` | $0 | Bajo (sin nube) | Empieza aquí para EDA |
-| EC2 + JupyterLab | ~$0.04/h mientras corre | Alto (ves la máquina) | Mejor para aprender |
+| EC2 + JupyterLab en contenedor | ~$0.01/h mientras corre (`t3.micro`) | Alto (ves la máquina) | Mejor para aprender |
 | SageMaker Studio | por hora de app + EFS | Medio (esconde la máquina) | Después, si acaso |
 
-Recomendado: **notebooks locales para EDA, y una EC2 pequeña cuando quieras sentir "cómputo en
-la nube"**. Si vas por la EC2:
+Recomendado: **notebooks locales para EDA, y la EC2 de desarrollo cuando quieras sentir "cómputo en
+la nube"**. Esa EC2 ya existe en el stack (issue #10) y el notebook corre ahí como contenedor
+(issue #11), no instalado en el host:
 
-- Security group con `8501`/`8888` abierto **solo a tu IP**, nunca `0.0.0.0/0`.
-- Apaga la instancia al terminar. Una `t3.medium` olvidada son ~$30/mes.
-- **Instance profile de IAM**, nunca access keys en el notebook.
+- **Sin reglas de entrada.** Jupyter se publica en `127.0.0.1:8888` dentro de la instancia y se
+  alcanza por un túnel de SSM Session Manager (`AWS-StartPortForwardingSession`). El puerto no se
+  abre en el security group: no hay una IP que autorizar ni una regla que olvidar.
+- **Instance profile de IAM**, nunca access keys en el notebook. El mismo rol firma el pull de la
+  imagen en ECR y la lectura de S3.
+- Apaga la instancia al terminar; el auto-stop de las 05:00 UTC lo hace solo. Una `t3.micro`
+  encendida 8 h/día cuesta ~$8.55/mes; 24/7, ~$13.64/mes. El disco y la IP pública se pagan igual
+  esté apagada.
+- El notebook vive en el EBS (`/srv/pinguinos/notebooks`): sobrevive al `stop`, se va con el
+  `terminate`. Si importa, tiene que volver a git o a S3.
 
 **Regla crítica:** los notebooks son para explorar. Cualquier transformación que sobreviva a
 producción debe *reescribirse* en `src/` y cubrirse con un test. Copiar y pegar celdas del
@@ -656,7 +666,7 @@ Registra la respuesta aquí cuando decidas.
 
 | Decisión | Opciones | Inclinación actual |
 |---|---|---|
-| Host de notebooks | local / EC2 / SageMaker Studio | local primero, EC2 para aprender |
+| Host de notebooks | local / EC2 / SageMaker Studio | **decidido:** local para EDA, EC2 de desarrollo para el resto (#11) |
 | Cómputo de entrenamiento | EC2 manual / tarea ECS / Batch / SageMaker | tarea ECS para la Fase 2 |
 | Exposición de inferencia | IP pública + SG (IP dinámica) | IP pública desde la Fase 3 |
 | Promoción del modelo | script manual / compuerta en CI | script para la Fase 3 |
