@@ -10,5 +10,7 @@ EXPOSE 5000
 ENTRYPOINT ["mlflow", "server", \
             "--host=0.0.0.0", \
             "--port=5000", \
+            "--workers=1", \
+            "--allowed-hosts=localhost,127.0.0.1,mlflow,mlflow:5000", \
             "--backend-store-uri=sqlite:////srv/pinguinos/mlflow/mlflow.db", \
             "--artifacts-destination=/srv/pinguinos/mlflow/artifacts"]
