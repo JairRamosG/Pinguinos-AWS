@@ -11,6 +11,6 @@ ENTRYPOINT ["mlflow", "server", \
             "--host=0.0.0.0", \
             "--port=5000", \
             "--workers=1", \
-            "--allowed-hosts=localhost,127.0.0.1,mlflow,mlflow:5000", \
+            "--allowed-hosts=localhost,localhost:5000,127.0.0.1, 127.0.0.1:5000,mlflow,mlflow:5000", \
             "--backend-store-uri=sqlite:////srv/pinguinos/mlflow/mlflow.db", \
             "--artifacts-destination=/srv/pinguinos/mlflow/artifacts"]
