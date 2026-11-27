@@ -1,0 +1,3 @@
+[tracking]
+uri = "http://mlflow:5000"
+experiment= "penguins"
