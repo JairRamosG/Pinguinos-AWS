@@ -91,10 +91,9 @@ pinguinos/
 │   │   ├── migrar-s3.sh      ← sube los datos al bucket
 │   │   ├── ssm-tunnel.sh     ← port forwarding SSM (jupyter/mlflow)
 │   │   └── remote-run.sh     ← ejecuta un script local en la EC2 por SSM
-│   ├── remoto/               ← se ejecutan DENTRO de la EC2
-│   │   ├── instance-bootstrap.sh ← docker, swap, directorios, red
-│   │   └── instance-deploy.sh    ← pull verificado y contenedores
-│   └── pull-jupyter.sh       ← legado de #11
+│   └── remoto/               ← se ejecutan DENTRO de la EC2
+│       ├── instance-bootstrap.sh ← docker, swap, directorios, red
+│       └── instance-deploy.sh    ← pull verificado y contenedores
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
@@ -523,8 +522,8 @@ La instancia no tiene access keys: el instance profile firma el `get-login-passw
 `GetAuthorizationToken` no acepta ARN de repositorio: ese `*` es de la API, no un atajo. Por
 eso el test de S3 filtra por acciones `s3:` en lugar de prohibir `*` en todo el rol.
 
-`scripts/pull-jupyter.sh` hace login, pull y verifica que el label
-`org.opencontainers.image.revision` corresponda al tag. El tag es el commit, no `latest`.
+El pull lo hace `scripts/remoto/instance-deploy.sh`: login, descarga y verificación del label
+`org.opencontainers.image.revision` antes de reemplazar el contenedor. El tag es el commit, no `latest`.
 
 #### El estado vive en el EBS
 
@@ -639,7 +638,7 @@ Actualizado al: **2026-11-24**
 | #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
 | #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
 | #10 EC2 dev | ✅ construido y verificado | `t3.micro` AL2023 en subred pública, sin ingress · EBS `gp3` 30 GB cifrado · IMDSv2 · instance profile con SSM + S3 por prefijo · auto-stop 05:00 UTC con `AWS-StopEC2Instance` · VPC inyectable · 12 tests de CDK · el primer deploy falló en la asociación SSM y se corrigió con `ParameterValues`; el deploy real se hizo al construir #11 |
-| #11 Jupyter | ✅ construido | Contenedor `pinguinos/jupyter:<SHA>` sobre la EC2 · `-p 127.0.0.1:8888` + túnel `AWS-StartPortForwardingSession` · bind mounts en `/srv/pinguinos` · `--restart unless-stopped` + Docker habilitado · swap 2 GB · hop limit 2 · permisos ECR acotados al repo · `scripts/pull-jupyter.sh` · pull, túnel y notebook contra S3 verificados en la instancia · 22 tests de CDK |
+| #11 Jupyter | ✅ construido | Contenedor `pinguinos/jupyter:<SHA>` sobre la EC2 · `-p 127.0.0.1:8888` + túnel `AWS-StartPortForwardingSession` · bind mounts en `/srv/pinguinos` · `--restart unless-stopped` + Docker habilitado · swap 2 GB · hop limit 2 · permisos ECR acotados al repo · pull verificado por `scripts/remoto/instance-deploy.sh` · pull, túnel y notebook contra S3 verificados en la instancia · 22 tests de CDK |
 | #12 MLflow | ⬜ pendiente | — |
 | #13 Training job | ⬜ pendiente | — |
 | #14 Fargate serve | ⬜ pendiente | — |
@@ -712,7 +711,7 @@ flowchart TB
 | 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
 | 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
 | 2026-11-18 | Issue #10 construido: EC2 `t3.micro` (AL2023) en subred pública sin reglas de entrada, EBS `gp3` 30 GB cifrado, IMDSv2, instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo, y auto-stop con la asociación `AWS-StopEC2Instance` a las 05:00 UTC. La VPC se inyecta para poder testear sin red; 12 tests de CDK. El primer deploy falló porque SSM exige `Targets` junto a `AutomationTargetParameterName` y, para runbooks de Automation, la key es `ParameterValues`; CloudFormation revirtió el create y el stack no queda en la cuenta. Se agrega §8 "La máquina de desarrollo". |
-| 2026-11-24 | Issue #11 construido: JupyterLab corre en un contenedor sobre la EC2, publicado solo en loopback y alcanzado por un túnel SSM (`AWS-StartPortForwardingSession`); bind mounts en `/srv/pinguinos`, `--restart unless-stopped`, Docker habilitado y swap de 2 GB. El hop limit sube a 2 porque el contenedor cruza el bridge de Docker y con 1 no llegaba al IMDS. El rol recibe los permisos mínimos de ECR acotados al repo de Jupyter, y el test de S3 pasa a filtrar por acciones `s3:` porque `GetAuthorizationToken` exige `*`. `scripts/pull-jupyter.sh` automatiza login, pull y verificación del label de revisión. Verificado en la instancia: pull, túnel y notebook contra S3. 22 tests de CDK. Se agrega §8 "Jupyter vive en un contenedor". |
+| 2026-11-24 | Issue #11 construido: JupyterLab corre en un contenedor sobre la EC2, publicado solo en loopback y alcanzado por un túnel SSM (`AWS-StartPortForwardingSession`); bind mounts en `/srv/pinguinos`, `--restart unless-stopped`, Docker habilitado y swap de 2 GB. El hop limit sube a 2 porque el contenedor cruza el bridge de Docker y con 1 no llegaba al IMDS. El rol recibe los permisos mínimos de ECR acotados al repo de Jupyter, y el test de S3 pasa a filtrar por acciones `s3:` porque `GetAuthorizationToken` exige `*`. `scripts/pull-jupyter.sh` automatizaba login, pull y verificación del label de revisión (reemplazado en #12 por `scripts/remoto/instance-deploy.sh`). Verificado en la instancia: pull, túnel y notebook contra S3. 22 tests de CDK. Se agrega §8 "Jupyter vive en un contenedor". |
 
 ---
 
