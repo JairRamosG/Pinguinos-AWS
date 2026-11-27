@@ -85,9 +85,16 @@ pinguinos/
 │   ├── serve.Dockerfile      ← FROM base + extra serve + Streamlit
 │   └── jupyter.Dockerfile    ← FROM base + extras dev/jupyter + JupyterLab
 ├── scripts/
-│   ├── build-images.sh       ← construye base -> train/serve/jupyter
-│   ├── build-and-push.sh     ← publica en ECR con credenciales temporales
-│   └── pull-jupyter.sh       ← en la EC2: login, pull y verificación del label
+│   ├── local/                ← se ejecutan en tu máquina
+│   │   ├── build-images.sh   ← construye base -> train/serve/jupyter/mlflow
+│   │   ├── build-and-push.sh ← publica en ECR con credenciales temporales
+│   │   ├── migrar-s3.sh      ← sube los datos al bucket
+│   │   ├── ssm-tunnel.sh     ← port forwarding SSM (jupyter/mlflow)
+│   │   └── remote-run.sh     ← ejecuta un script local en la EC2 por SSM
+│   ├── remoto/               ← se ejecutan DENTRO de la EC2
+│   │   ├── instance-bootstrap.sh ← docker, swap, directorios, red
+│   │   └── instance-deploy.sh    ← pull verificado y contenedores
+│   └── pull-jupyter.sh       ← legado de #11
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
@@ -214,14 +221,14 @@ flowchart LR
 | `docker/serve.Dockerfile` | `FROM base` + extra `serve` + Streamlit |
 | `docker/jupyter.Dockerfile` | `FROM base` + extras `dev`/`jupyter` + JupyterLab |
 | `.dockerignore` | qué **no** entra al contexto de build |
-| `scripts/build-images.sh` | construye las cuatro en orden |
-| `scripts/build-and-push.sh` | construye con SHA y publica `train`/`serve`/`jupyter` en ECR |
+| `scripts/local/build-images.sh` | construye las cuatro en orden |
+| `scripts/local/build-and-push.sh` | construye con SHA y publica `train`/`serve`/`jupyter`/`mlflow` en ECR |
 | `docker-compose.yml` | levanta Jupyter local |
 
 ### El orden es obligatorio
 
 ```bash
-./scripts/build-images.sh          # base -> train / serve / jupyter
+./scripts/local/build-images.sh          # base -> train / serve / jupyter
 ```
 
 Las derivadas empiezan con `FROM penguins/base:local`. Si la base no existe, fallan con
@@ -231,20 +238,20 @@ son fotos, no referencias vivas.
 ### Publicar en ECR (`build-and-push.sh`)
 
 `build-and-push.sh` es el camino de publicación. No reconstruye lógica: reutiliza
-`build-images.sh` con el SHA corto y empuja las tres imágenes.
+`build-images.sh` con el SHA corto y empuja las imágenes elegidas (las cuatro por defecto).
 
 ```bash
-./scripts/build-and-push.sh
+./scripts/local/build-and-push.sh
 ```
 
-Usa el perfil SSO `mi-asus` por defecto; `AWS_PROFILE=otro` lo sobreescribe.
+Usa `AWS_PROFILE` si está definido; si no, la cadena de credenciales por defecto de la CLI.
 
 1. Exige el árbol de git limpio: el tag debe identificar exactamente un commit.
 2. Resuelve la cuenta con `aws sts get-caller-identity` y arma el registro
    `<cuenta>.dkr.ecr.us-east-1.amazonaws.com`.
 3. Obtiene un token con `aws ecr get-login-password` y hace `docker login`.
-4. Construye `penguins/{train,serve,jupyter}:<SHA>` con `build-images.sh`.
-5. Etiqueta y empuja a `pinguinos/{train,serve,jupyter}:<SHA>`.
+4. Construye `penguins/{train,serve,jupyter,mlflow}:<SHA>` con `build-images.sh`.
+5. Etiqueta y empuja a `pinguinos/{train,serve,jupyter,mlflow}:<SHA>`.
 6. Verifica que el label `org.opencontainers.image.revision` sea el SHA completo.
 
 | Local | ECR |
