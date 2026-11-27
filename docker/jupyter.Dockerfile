@@ -3,7 +3,7 @@ FROM ${BASE_IMAGE}
 
 USER appuser
 RUN --mount=type=cache,target=/home/appuser/.cache/uv,uid=1000 \
-    uv sync --locked --extra dev --extra jupyter --no-editable
+    uv sync --locked --extra dev --extra jupyter --extra mlflow --no-editable
 
 ENV PATH="/app/.venv/bin:${PATH}"
 EXPOSE 8888
