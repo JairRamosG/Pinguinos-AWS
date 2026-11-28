@@ -68,9 +68,11 @@ def dataset_fingerprint(uri: str | Path) -> tuple[str, int]:
 def config_hash(config: TrainConfig) -> str:
     """
     Hash canónico de la configuración resuelta (independiente del orden de claves)
+
+    Excluye el bloque `tracking`: identifica el experimento, no dónde se registró.
     """
     payload = json.dumps(
-        config.model_dump(mode="json"),
+        config.model_dump(mode="json", exclude={"tracking"}),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False
@@ -100,13 +102,17 @@ def build_manifest(
     etag:str,
     size_bytes: int,
     rows: int,
-    metrics: dict[str, float]
+    metrics: dict[str, float],
+    tracking_run_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Construye el manifest (schema v1) con procedencia completa
+    Construye el manifest (schema v2) con procedencia completa
+
+    `run_id` identifica la corrida local y la carpeta del artefacto;
+    `tracking.run_id` identifica la corrida en MLflow. No son el mismo id.
     """
     return{
-        "manifest_version" : 1,
+        "manifest_version" : 2,
         "run_id" : run,
         "created_at" : created_at,
         "code" : {"git_sha": git_sha(), "git_dirty": git_dirty()},
@@ -136,6 +142,10 @@ def build_manifest(
             "model_file": "model.pkl",
             "pickle_protocol": pickle.HIGHEST_PROTOCOL
         },
-        "tracking_uri": config.tracking.uri
+        "tracking": {
+            "uri": config.tracking.uri or None,
+            "experiment": config.tracking.experiment,
+            "run_id": tracking_run_id
+        }
     }
 

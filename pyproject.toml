@@ -27,6 +27,9 @@ serve = [
 jupyter = [
     "jupyterlab>=4.6.6",
 ]
+mlflow = [
+    "mlflow>=3.18.0",
+]
 
 [build-system]
 requires = ["hatchling"]

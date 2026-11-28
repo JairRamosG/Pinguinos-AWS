@@ -55,6 +55,7 @@ class OutputConfig(BaseModel):
 
 class TrackingConfig(BaseModel):
     uri: str = ""
+    experiment: str = "penguins"
 
 class TrainConfig(BaseModel):
     run: RunConfig = Field(default_factory=RunConfig)
@@ -90,5 +91,7 @@ def load_config(*paths: str | Path) -> TrainConfig:
         merged.setdefault("data", {})["uri"] = value
     if value := os.getenv("PENGUINS_OUTPUT_URI"):
         merged.setdefault("output", {})["uri"] = value
+    if value := os.getenv("PENGUINS_TRACKING_URI"):
+        merged.setdefault("tracking", {})["uri"] = value
 
     return TrainConfig.model_validate(merged)

@@ -50,20 +50,6 @@ def test_bucket_se_borra_con_el_stack():
     assert bucket["DeletionPolicy"] == "Delete"
     assert bucket["UpdateReplacePolicy"] == "Delete"
 
-def test_hay_tres_repositorios_ecr():
-    template = _template()
-    template.resource_count_is("AWS::ECR::Repository", 3)
-
-
-def test_repositorios_tienen_los_nombres_esperados():
-    template = _template()
-    names = {
-        repo["Properties"]["RepositoryName"]
-        for repo in template.find_resources("AWS::ECR::Repository").values()
-    }
-    assert names == {"pinguinos/train", "pinguinos/serve", "pinguinos/jupyter"}
-
-
 def test_ecr_escanea_al_push():
     template = _template()
     for repo in template.find_resources("AWS::ECR::Repository").values():
@@ -245,3 +231,29 @@ def test_rol_puede_descargar_la_imagen_de_jupyter():
     repos = template.find_resources("AWS::ECR::Repository")
     assert logical_id in repos
     assert repos[logical_id]["Properties"]["RepositoryName"] == "pinguinos/jupyter"
+
+def test_hay_cuatro_repositorios_con_los_nombres_esperados():
+    template = _template()
+    template.resource_count_is("AWS::ECR::Repository", 4)
+    names = {
+        repo["Properties"]["RepositoryName"]
+        for repo in template.find_resources("AWS::ECR::Repository").values()
+    }
+    assert names == {
+        "pinguinos/train", "pinguinos/serve", "pinguinos/jupyter", "pinguinos/mlflow",
+    }
+
+
+def test_rol_puede_descargar_la_imagen_de_mlflow():
+    template = _template()
+    pull = next(
+        s for s in _statements_del_rol(template, "ec2.amazonaws.com")
+        if s.get("Sid") == "PullMlflowImage"
+    )
+    assert set(pull["Action"]) == {
+        "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
+    }
+    logical_id, attribute = pull["Resource"]["Fn::GetAtt"]
+    assert attribute == "Arn"
+    repos = template.find_resources("AWS::ECR::Repository")
+    assert repos[logical_id]["Properties"]["RepositoryName"] == "pinguinos/mlflow"

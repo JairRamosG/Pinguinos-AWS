@@ -75,3 +75,12 @@ def test_valor_fuera_de_rango_falla(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         load_config(bad)
+
+def test_tracking_uri_se_lee_del_toml(tmp_path: Path) -> None:
+    mlflow_toml = _write(
+        tmp_path / "mlflow.toml",
+        '[tracking]\nuri = "http://mlflow:5000"\nexperiment = "penguins"\n',
+    )
+    config = load_config("configs/base.toml", "configs/local.toml", mlflow_toml)
+    assert config.tracking.uri == "http://mlflow:5000"
+    assert config.tracking.experiment == "penguins"

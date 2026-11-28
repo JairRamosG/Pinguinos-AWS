@@ -46,7 +46,7 @@ class PinguinosStack(Stack):
         
         # --- Repositorios para las imágenes --- 
         repos: dict[str, ecr.Repository] = {}
-        for image in ("train", "serve", "jupyter"):
+        for image in ("train", "serve", "jupyter", "mlflow"):
             repo = ecr.Repository(
                 self,
                 f"{image.capitalize()}Repository",
@@ -133,17 +133,18 @@ class PinguinosStack(Stack):
             )
         )
 
-        dev_role.add_to_policy(
-            iam.PolicyStatement(
-                sid = "PullJupyterImage",
-                actions = [
-                    "ecr:BatchCheckLayerAvailability",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:BatchGetImage"
-                ],
-                resources = [repos["jupyter"].repository_arn]
+        for image in ("jupyter", "mlflow"):
+            dev_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid = f"Pull{image.capitalize()}Image",
+                    actions = [
+                        "ecr:BatchCheckLayerAvailability",
+                        "ecr:GetDownloadUrlForLayer",
+                        "ecr:BatchGetImage"
+                    ],
+                    resources = [repos[image].repository_arn]
+                )
             )
-        )
 
         # --- Instancia de desarrollo ---
         dev_instance = ec2.Instance(

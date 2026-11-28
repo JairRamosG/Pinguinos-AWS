@@ -181,3 +181,21 @@ def test_datos_inexistentes_devuelve_1(tmp_path) -> None:
         encoding="utf-8",
     )
     assert main(["--config", str(config)]) == 1
+
+def test_manifest_es_v2_e_incluye_tracking(tmp_path) -> None:
+    out = tmp_path / "artifacts"
+    config = _config_file(tmp_path, _csv(tmp_path), out)
+
+    assert main(["--config", config]) == 0
+
+    manifest = json.loads(next(out.glob("*/manifest.json")).read_text())
+    assert manifest["manifest_version"] == 2
+    assert manifest["tracking"] == {"uri": None, "experiment": "penguins", "run_id": None}
+    assert "tracking_uri" not in manifest
+
+
+def test_config_hash_ignora_el_bloque_tracking() -> None:
+    payload = {"data": {"uri": "x", "features": ["island"]}}
+    con = TrainConfig.model_validate({**payload, "tracking": {"uri": "http://mlflow:5000"}})
+    sin = TrainConfig.model_validate(payload)
+    assert provenance.config_hash(sin) == provenance.config_hash(con)

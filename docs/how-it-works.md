@@ -1,7 +1,7 @@
 # Cómo funciona este proyecto — apuntes vivos
 
 > **Documento vivo.** Se actualiza al cerrar cada issue.
-> Última actualización: 2026-11-24 · Fase actual: 4 (EC2 de desarrollo)
+> Última actualización: 2026-11-27 · Fase actual: 4 (EC2 de desarrollo)
 
 Este documento no reemplaza a `architecture.md` (el *qué*) ni a
 `implementation-plan.md` (el *en qué orden*). Es el **modelo mental**: cómo encajan
@@ -85,9 +85,15 @@ pinguinos/
 │   ├── serve.Dockerfile      ← FROM base + extra serve + Streamlit
 │   └── jupyter.Dockerfile    ← FROM base + extras dev/jupyter + JupyterLab
 ├── scripts/
-│   ├── build-images.sh       ← construye base -> train/serve/jupyter
-│   ├── build-and-push.sh     ← publica en ECR con credenciales temporales
-│   └── pull-jupyter.sh       ← en la EC2: login, pull y verificación del label
+│   ├── local/                ← se ejecutan en tu máquina
+│   │   ├── build-images.sh   ← construye base -> train/serve/jupyter/mlflow
+│   │   ├── build-and-push.sh ← publica en ECR con credenciales temporales
+│   │   ├── migrar-s3.sh      ← sube los datos al bucket
+│   │   ├── ssm-tunnel.sh     ← port forwarding SSM (jupyter/mlflow)
+│   │   └── remote-run.sh     ← ejecuta un script local en la EC2 por SSM
+│   └── remoto/               ← se ejecutan DENTRO de la EC2
+│       ├── instance-bootstrap.sh ← docker, swap, directorios, red
+│       └── instance-deploy.sh    ← pull verificado y contenedores
 ├── docker-compose.yml        ← levanta Jupyter y serve en local
 ├── .dockerignore             ← qué NO entra al contexto de build
 ├── pinguinos/                ← CDK: describe la infraestructura
@@ -155,7 +161,10 @@ El manifest es el **contrato de procedencia**:
 | `config_sources` | qué capas de TOML se cargaron |
 | `overrides` | qué se pisó por CLI |
 | `cv` + `metrics` | cómo se evaluó |
-| `tracking_uri` | reservado para la Fase 4 (MLflow) |
+| `tracking` | dónde quedó registrada la corrida (`uri`, `experiment`, `run_id`) |
+
+El manifest es **schema v2**: `run_id` (raíz) identifica la carpeta del artefacto, y
+`tracking.run_id` la corrida de MLflow. Son dos ids distintos y no se mezclan.
 
 ### La escritura es atómica
 
@@ -214,14 +223,14 @@ flowchart LR
 | `docker/serve.Dockerfile` | `FROM base` + extra `serve` + Streamlit |
 | `docker/jupyter.Dockerfile` | `FROM base` + extras `dev`/`jupyter` + JupyterLab |
 | `.dockerignore` | qué **no** entra al contexto de build |
-| `scripts/build-images.sh` | construye las cuatro en orden |
-| `scripts/build-and-push.sh` | construye con SHA y publica `train`/`serve`/`jupyter` en ECR |
+| `scripts/local/build-images.sh` | construye las cuatro en orden |
+| `scripts/local/build-and-push.sh` | construye con SHA y publica `train`/`serve`/`jupyter`/`mlflow` en ECR |
 | `docker-compose.yml` | levanta Jupyter local |
 
 ### El orden es obligatorio
 
 ```bash
-./scripts/build-images.sh          # base -> train / serve / jupyter
+./scripts/local/build-images.sh          # base -> train / serve / jupyter
 ```
 
 Las derivadas empiezan con `FROM penguins/base:local`. Si la base no existe, fallan con
@@ -231,20 +240,20 @@ son fotos, no referencias vivas.
 ### Publicar en ECR (`build-and-push.sh`)
 
 `build-and-push.sh` es el camino de publicación. No reconstruye lógica: reutiliza
-`build-images.sh` con el SHA corto y empuja las tres imágenes.
+`build-images.sh` con el SHA corto y empuja las imágenes elegidas (las cuatro por defecto).
 
 ```bash
-./scripts/build-and-push.sh
+./scripts/local/build-and-push.sh
 ```
 
-Usa el perfil SSO `mi-asus` por defecto; `AWS_PROFILE=otro` lo sobreescribe.
+Usa `AWS_PROFILE` si está definido; si no, la cadena de credenciales por defecto de la CLI.
 
 1. Exige el árbol de git limpio: el tag debe identificar exactamente un commit.
 2. Resuelve la cuenta con `aws sts get-caller-identity` y arma el registro
    `<cuenta>.dkr.ecr.us-east-1.amazonaws.com`.
 3. Obtiene un token con `aws ecr get-login-password` y hace `docker login`.
-4. Construye `penguins/{train,serve,jupyter}:<SHA>` con `build-images.sh`.
-5. Etiqueta y empuja a `pinguinos/{train,serve,jupyter}:<SHA>`.
+4. Construye `penguins/{train,serve,jupyter,mlflow}:<SHA>` con `build-images.sh`.
+5. Etiqueta y empuja a `pinguinos/{train,serve,jupyter,mlflow}:<SHA>`.
 6. Verifica que el label `org.opencontainers.image.revision` sea el SHA completo.
 
 | Local | ECR |
@@ -504,20 +513,23 @@ un puerto olvidado en el security group.
 #### De dónde sale la imagen
 
 La instancia no tiene access keys: el instance profile firma el `get-login-password` y el
-`pull`. El rol tiene los permisos mínimos, y solo sobre el repositorio de Jupyter:
+`pull`. El rol tiene los permisos mínimos, y solo sobre los repositorios que la instancia corre:
 
 | Acción | Recurso |
 |---|---|
 | `ecr:GetAuthorizationToken` | `*` |
-| `ecr:BatchCheckLayerAvailability` | repo `pinguinos/jupyter` |
-| `ecr:GetDownloadUrlForLayer` | repo `pinguinos/jupyter` |
-| `ecr:BatchGetImage` | repo `pinguinos/jupyter` |
+| `ecr:BatchCheckLayerAvailability` | repos `pinguinos/jupyter` y `pinguinos/mlflow` |
+| `ecr:GetDownloadUrlForLayer` | repos `pinguinos/jupyter` y `pinguinos/mlflow` |
+| `ecr:BatchGetImage` | repos `pinguinos/jupyter` y `pinguinos/mlflow` |
+
+Ese alcance explica un error real: si el deploy intenta bajar `train` o `serve`, ECR responde
+`AccessDenied`. La instancia solo descarga lo que ejecuta; el resto se publica pero no se baja.
 
 `GetAuthorizationToken` no acepta ARN de repositorio: ese `*` es de la API, no un atajo. Por
 eso el test de S3 filtra por acciones `s3:` en lugar de prohibir `*` en todo el rol.
 
-`scripts/pull-jupyter.sh` hace login, pull y verifica que el label
-`org.opencontainers.image.revision` corresponda al tag. El tag es el commit, no `latest`.
+El pull lo hace `scripts/remoto/instance-deploy.sh`: login, descarga y verificación del label
+`org.opencontainers.image.revision` antes de reemplazar el contenedor. El tag es el commit, no `latest`.
 
 #### El estado vive en el EBS
 
@@ -542,6 +554,68 @@ mano. Es deliberado: distingue "se apagó la máquina" de "lo paré yo".
 
 Con 1 GiB, Jupyter arranca pero el kernel de pandas queda al límite. Por eso el host tiene un
 swapfile de 2 GB: no es rendimiento, es no despertarse con el OOM killer.
+
+### MLflow vive en la misma EC2, en su propio contenedor
+
+MLflow registra la **historia** de las corridas. No reemplaza a S3: el modelo que consume `serve`
+sigue siendo `s3://.../models/<run_id>/`. MLflow guarda qué probaste, con qué config y cómo rindió.
+
+Su default son **4 workers**. En esta instancia eso llevó el swap a 2/2 GB y los workers morían en
+bucle. Con `--workers=1` entra sin drama.
+
+| Qué | Dónde | `stop`/`start` | `terminate` |
+|---|---|---|---|
+| Corridas, parámetros, métricas | `/srv/pinguinos/mlflow/mlflow.db` | ✅ | ❌ |
+| Copia de los artefactos | `/srv/pinguinos/mlflow/artifacts/` | ✅ | ❌ |
+| Modelo desplegable | `s3://.../models/<run_id>/` | ✅ | ✅ |
+
+#### La red es la conexión
+
+Jupyter y MLflow están en la red Docker `pinguinos`. Jupyter lo alcanza como
+`http://mlflow:5000` (nombre del contenedor); el host publica solo `127.0.0.1:5000` para el
+túnel. No hay ingress ni puerto abierto al exterior.
+
+La URI no está en el código: vive en `configs/mlflow.toml` (`[tracking] uri = ...`). Si el archivo
+no se pasa con `--config`, el tracking queda apagado y `train` no registra nada.
+
+#### Los flags que no son decorativos
+
+| Flag | Por qué |
+|---|---|
+| `--workers=1` | con 4 workers, 1 GiB no alcanza: swap al tope y workers muriendo en bucle |
+| `--allowed-hosts=...` | MLflow 3.18 rechaza Host desconocidos; incluye `localhost:5000` (navegador) y `mlflow:5000` (Jupyter) |
+| `--artifacts-destination=...` | el servidor proxya las subidas; el cliente no necesita permisos de S3 |
+
+`--backend-store-uri sqlite:////srv/pinguinos/mlflow/mlflow.db` es el cuarto: un archivo en el EBS,
+sin base de datos que administrar.
+
+Los configs se hornean en la imagen. Cambiar un TOML exige reconstruir y publicar; editar el
+archivo en la instancia no cambia nada.
+
+#### Correr una corrida
+
+Dentro del contenedor de Jupyter (su venv, su red):
+
+```bash
+# el terminal de Jupyter abre sh: usá el Python del venv, no el del sistema
+/app/.venv/bin/python -m penguins_ml.train \
+  --config configs/base.toml --config configs/cloud.toml --config configs/mlflow.toml
+```
+
+La segunda corrida agrega `--config configs/exp_max_depth8.toml`. En la UI se comparan: mismo
+`data.etag`, distinto `config_hash`, distinto `model.max_depth` y métricas por fold.
+
+MLflow avisa que no encuentra Git. Es esperado: la imagen no trae el binario, y la procedencia
+real viaja en el manifest (`code.git_sha`) desde el build.
+
+#### Llegar a la UI
+
+```bash
+./scripts/local/ssm-tunnel.sh mlflow     # 127.0.0.1:5000 en tu laptop
+```
+
+El enlace que imprime la corrida usa `http://mlflow:5000`; en el navegador cambiá el host por
+`localhost`.
 
 ### El auto-stop es una asociación, no un cron del sistema
 
@@ -618,7 +692,7 @@ y sabe **qué le falta** cuando alguna no tiene respuesta.
 
 ## 11. Estado del proyecto
 
-Actualizado al: **2026-11-24**
+Actualizado al: **2026-11-27**
 
 | Issue | Estado | Qué existe ya |
 |---|---|---|
@@ -630,10 +704,10 @@ Actualizado al: **2026-11-24**
 | #6 Imágenes | ✅ cerrado | `Dockerfile.base` + `train`/`serve`/`jupyter` · script de build · compose para Jupyter · no-root · sin datos · procedencia inyectada · 34 tests · 829 MB / 1.24 GB / 1.25 GB |
 | #7 Streamlit local | ✅ cerrado | `serving.py` (lógica) + `serve.py` (UI) · servicio `serve` en compose · montaje `:ro` · precedencia `--model-uri` > env > último · 46 tests |
 | #8 S3 + sin keys | ✅ cerrado | `storage.py` (local/S3) · `load_dataframe` y fingerprint sobre `s3://` · `train` publica en S3 con `manifest.json` al final · `serve` descarga a temporal y toma el run más reciente · contenedor con `~/.aws:ro` · 13 tests con moto · run real en S3 · 59 tests |
-| #9 ECR | ✅ construido | 3 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter` · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · 5 tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
+| #9 ECR | ✅ construido | 4 repos `pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`, `pinguinos/mlflow` (este último en #12) · scan on push · lifecycle untagged 14 días · `DESTROY` + `empty_on_delete` · tests de CDK · `build-and-push.sh` con tag SHA y credenciales temporales |
 | #10 EC2 dev | ✅ construido y verificado | `t3.micro` AL2023 en subred pública, sin ingress · EBS `gp3` 30 GB cifrado · IMDSv2 · instance profile con SSM + S3 por prefijo · auto-stop 05:00 UTC con `AWS-StopEC2Instance` · VPC inyectable · 12 tests de CDK · el primer deploy falló en la asociación SSM y se corrigió con `ParameterValues`; el deploy real se hizo al construir #11 |
-| #11 Jupyter | ✅ construido | Contenedor `pinguinos/jupyter:<SHA>` sobre la EC2 · `-p 127.0.0.1:8888` + túnel `AWS-StartPortForwardingSession` · bind mounts en `/srv/pinguinos` · `--restart unless-stopped` + Docker habilitado · swap 2 GB · hop limit 2 · permisos ECR acotados al repo · `scripts/pull-jupyter.sh` · pull, túnel y notebook contra S3 verificados en la instancia · 22 tests de CDK |
-| #12 MLflow | ⬜ pendiente | — |
+| #11 Jupyter | ✅ construido | Contenedor `pinguinos/jupyter:<SHA>` sobre la EC2 · `-p 127.0.0.1:8888` + túnel `AWS-StartPortForwardingSession` · bind mounts en `/srv/pinguinos` · `--restart unless-stopped` + Docker habilitado · swap 2 GB · hop limit 2 · permisos ECR acotados al repo · pull verificado por `scripts/remoto/instance-deploy.sh` · pull, túnel y notebook contra S3 verificados en la instancia · 22 tests de CDK |
+| #12 MLflow | ✅ construido | Contenedor `pinguinos/mlflow:<SHA>` en la misma EC2 · SQLite y artefactos en `/srv/pinguinos/mlflow` · red `pinguinos` (Jupyter lo ve como `mlflow:5000`) · `127.0.0.1:5000` + túnel SSM · `--workers=1` y `--allowed-hosts` por la seguridad de MLflow 3.18 · repo ECR y pull acotado a jupyter+mlflow · `train` registra parámetros, métricas por fold y artefactos; manifest v2 con `tracking.run_id` · dos corridas comparadas (max_depth 5 vs 8) · deploy por `scripts/remoto/instance-deploy.sh` |
 | #13 Training job | ⬜ pendiente | — |
 | #14 Fargate serve | ⬜ pendiente | — |
 | #15 Operación | ⬜ pendiente | — |
@@ -657,7 +731,7 @@ flowchart LR
         TK["CDKToolkit<br/>bucket de assets · 5 roles · SSM v32"]
         BUD["Budget Pinguinos-Mensual<br/>$5/mes · alerta 80%"]
     end
-    EST["Al 2026-11-24: la EC2 dev se desplegó para verificar #11<br/>(pull · túnel · notebook). El proyecto destruye al terminar:<br/>consultá la cuenta antes de asumir que sigue ahí"]
+    EST["Al 2026-11-27: la EC2 dev corre Jupyter y MLflow<br/>(#11 y #12 verificados). El proyecto destruye al terminar:<br/>consultá la cuenta antes de asumir que sigue ahí"]
 ```
 
 ---
@@ -675,12 +749,12 @@ flowchart TB
         TRN["CLI de entrenamiento<br/>local o S3 · model.pkl + manifest"]
         IMG["imágenes<br/>base · train · serve · jupyter"]
         UI["inferencia local o desde S3<br/>Streamlit + compose"]
-        ECR["ECR<br/>pinguinos/train · serve · jupyter<br/>scan + lifecycle 14d"]
+        ECR["ECR<br/>pinguinos/train · serve · jupyter · mlflow<br/>scan + lifecycle 14d"]
         EC2["EC2 dev<br/>t3.micro · EBS 30 GB · SSM · auto-stop"]
         JUP["Jupyter sobre la EC2<br/>contenedor · loopback + túnel SSM<br/>EBS como copia de trabajo"]
+        MLF["MLflow en la misma EC2<br/>SQLite + artefactos en EBS<br/>red pinguinos · 1 worker"]
     end
     subgraph DESPUES["Lo que viene"]
-        MLF["MLflow"]
         JOB["training job"]
         SRV["Fargate serve"]
         OBS["CloudWatch + alarmas"]
@@ -705,7 +779,8 @@ flowchart TB
 | 2026-11-13 | Issue #8 cerrado: `storage.py` abstrae local y S3; `load_dataframe`, `dataset_fingerprint`, `train` y `serve` aceptan `s3://`. El artefacto se publica con `manifest.json` al final y `serve` toma el run más reciente si la URI termina en `/`. Verificado contra AWS real con perfil SSO; 59 tests (13 con moto). El bucket se destruyó tras la verificación. Se agrega §6 "Servir desde S3". |
 | 2026-11-15 | Issue #9 construido: 3 repositorios ECR (`pinguinos/train`, `pinguinos/serve`, `pinguinos/jupyter`) con scan on push, lifecycle untagged a 14 días y `DESTROY` + `empty_on_delete`; 5 tests de CDK. `build-and-push.sh` publica las imágenes con tag SHA y aísla las credenciales en un `DOCKER_CONFIG` temporal que se borra al salir. Se agrega §5 "Publicar en ECR". |
 | 2026-11-18 | Issue #10 construido: EC2 `t3.micro` (AL2023) en subred pública sin reglas de entrada, EBS `gp3` 30 GB cifrado, IMDSv2, instance profile con `AmazonSSMManagedInstanceCore` + S3 por prefijo, y auto-stop con la asociación `AWS-StopEC2Instance` a las 05:00 UTC. La VPC se inyecta para poder testear sin red; 12 tests de CDK. El primer deploy falló porque SSM exige `Targets` junto a `AutomationTargetParameterName` y, para runbooks de Automation, la key es `ParameterValues`; CloudFormation revirtió el create y el stack no queda en la cuenta. Se agrega §8 "La máquina de desarrollo". |
-| 2026-11-24 | Issue #11 construido: JupyterLab corre en un contenedor sobre la EC2, publicado solo en loopback y alcanzado por un túnel SSM (`AWS-StartPortForwardingSession`); bind mounts en `/srv/pinguinos`, `--restart unless-stopped`, Docker habilitado y swap de 2 GB. El hop limit sube a 2 porque el contenedor cruza el bridge de Docker y con 1 no llegaba al IMDS. El rol recibe los permisos mínimos de ECR acotados al repo de Jupyter, y el test de S3 pasa a filtrar por acciones `s3:` porque `GetAuthorizationToken` exige `*`. `scripts/pull-jupyter.sh` automatiza login, pull y verificación del label de revisión. Verificado en la instancia: pull, túnel y notebook contra S3. 22 tests de CDK. Se agrega §8 "Jupyter vive en un contenedor". |
+| 2026-11-24 | Issue #11 construido: JupyterLab corre en un contenedor sobre la EC2, publicado solo en loopback y alcanzado por un túnel SSM (`AWS-StartPortForwardingSession`); bind mounts en `/srv/pinguinos`, `--restart unless-stopped`, Docker habilitado y swap de 2 GB. El hop limit sube a 2 porque el contenedor cruza el bridge de Docker y con 1 no llegaba al IMDS. El rol recibe los permisos mínimos de ECR acotados al repo de Jupyter, y el test de S3 pasa a filtrar por acciones `s3:` porque `GetAuthorizationToken` exige `*`. `scripts/pull-jupyter.sh` automatizaba login, pull y verificación del label de revisión (reemplazado en #12 por `scripts/remoto/instance-deploy.sh`). Verificado en la instancia: pull, túnel y notebook contra S3. 22 tests de CDK. Se agrega §8 "Jupyter vive en un contenedor". |
+| 2026-11-27 | Issue #12 construido: MLflow corre en un contenedor sobre la misma EC2, con SQLite y artefactos en `/srv/pinguinos/mlflow` y solo loopback (`127.0.0.1:5000`) alcanzado por túnel SSM. Jupyter lo ve como `mlflow:5000` por la red Docker. La imagen usa `--workers=1` porque los 4 workers por defecto llenaban el swap de la t3.micro, y `--allowed-hosts` porque MLflow 3.18 rechaza Host desconocidos. El stack agrega el repo `pinguinos/mlflow` y pull acotado a jupyter+mlflow; bajar `train`/`serve` da `AccessDenied` por diseño. `train` registra parámetros, métricas por fold y artefactos, y el manifest pasa a v2 con `tracking.run_id`. Verificado: dos corridas comparadas (max_depth 5 vs 8) y UI por túnel. Los scripts se separan en `local/` y `remoto/`, con `remote-run.sh` para ejecutar por SSM; se retira `pull-jupyter.sh`. |
 
 ---
 

@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ import pandas as pd
 from pydantic import ValidationError
 from sklearn.model_selection import StratifiedKFold, cross_validate
 
-from penguins_ml import provenance, storage
+from penguins_ml import provenance, storage, tracking
 from penguins_ml.config import TrainConfig, load_config
 from penguins_ml.data import validate_schema, load_dataframe
 from penguins_ml.transforms import build_pipeline
@@ -165,15 +166,19 @@ def _publish_artifact(
     pipeline: Any,
     manifest: dict[str, Any],
     cv_payload: dict[str, Any],
+    on_written: Callable[[Path], None] | None = None,
 ) -> str:
     """
     Escribe el artefacto en un staging local y lo sube a S3.
 
     El manifest va el último: si aparece en S3, el artefacto está completo.
+    `on_written` recibe el directorio ya escrito, antes del `finally`.
     """
     staging = Path(tempfile.mkdtemp(prefix=".stage-"))
     try:
         local_dir = _write_artifact(staging, run, pipeline, manifest, cv_payload)
+        if on_written is not None:
+            on_written(local_dir)
         base = output_uri.rstrip("/")
         for name in ("model.pkl", "cv.json", "manifest.json"):
             storage.write_bytes(f"{base}/{run}/{name}", (local_dir / name).read_bytes())
@@ -181,23 +186,36 @@ def _publish_artifact(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level = logging.INFO,
-        format="%(levelname)s %(message)s",
-        stream=sys.stderr
-    )
-    args = _parse_args(argv)
+class _TrainingError(Exception):
+    """Fallo esperado: corta la corrida y fija el exit code."""
 
-    # Fase 1: conifg. para fallar antes de tocar los datos
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _configurar(
+    args: argparse.Namespace,
+) -> tuple[TrainConfig | None, dict[str, Any], Any]:
     try:
         config = load_config(*args.config)
         config, overrides = _apply_overrides(config, args)
-        pipeline = build_pipeline(config)
+        return config, overrides, build_pipeline(config)
     except (ValueError, OSError) as exc:
         log.error(f"Configuración no valida: {_config_error(exc)}")
-        return 2
+        return None, {}, None
 
+
+def _train(
+    *,
+    config: TrainConfig,
+    args: argparse.Namespace,
+    overrides: dict[str, Any],
+    pipeline: Any,
+    run: str,
+    created_at: str,
+    mlflow_run_id: str | None,
+) -> None:
     # Fase 2: datos
     features, target = config.data.features, config.data.target
     try:
@@ -206,47 +224,45 @@ def main(argv: list[str] | None = None) -> int:
         _validate_folds(df[target], config.run.folds)
         etag, size_bytes = provenance.dataset_fingerprint(config.data.uri)
     except (ValueError, OSError, storage.StorageError) as exc:
-        log.error(f"Datos no validos: {exc}")
-        return 1
+        raise _TrainingError(f"Datos no validos: {exc}") from exc
 
     # Fase 3: CV para métricas y fit al final sobre todos los datos
     try:
         cv = StratifiedKFold(
-            n_splits= config.run.folds,
-            shuffle = True,
-            random_state= config.run.seed
+            n_splits=config.run.folds,
+            shuffle=True,
+            random_state=config.run.seed,
         )
         result = cross_validate(
-            pipeline, 
+            pipeline,
             df[features],
             df[target],
-            cv = cv,
-            scoring = SCORES,
-            error_score = "raise",
-            return_indices = True
+            cv=cv,
+            scoring=SCORES,
+            error_score="raise",
+            return_indices=True,
         )
         metrics = _metrics(result)
         cv_payload = _cv_payload(result, config)
         pipeline.fit(df[features], df[target])
-
     except Exception as exc:
-        log.error(f"Entrenamiento fallido: {exc}")
-        return 1
+        raise _TrainingError(f"Entrenamiento fallido: {exc}") from exc
+
+    tracking.log_metrics(tracking.metrics_from_cv(metrics, cv_payload))
 
     # Fase 4: artefacto
-    now = provenance.utc_now()
-    run = provenance.run_id(now)
     manifest = provenance.build_manifest(
-        config = config,
-        config_sources = [str(Path(path)) for path in args.config],
-        overrides = overrides,
-        run = run,
-        created_at= provenance.iso(now),
-        data_uri= config.data.uri,
-        etag = etag,
-        size_bytes = size_bytes,
-        rows = len(df),
-        metrics = metrics
+        config=config,
+        config_sources=[str(Path(path)) for path in args.config],
+        overrides=overrides,
+        run=run,
+        created_at=created_at,
+        data_uri=config.data.uri,
+        etag=etag,
+        size_bytes=size_bytes,
+        rows=len(df),
+        metrics=metrics,
+        tracking_run_id=mlflow_run_id,
     )
 
     output_uri = str(config.output.uri)
@@ -254,28 +270,71 @@ def main(argv: list[str] | None = None) -> int:
         if storage.is_s3(output_uri):
             final = _publish_artifact(
                 output_uri,
-                run, 
-                pipeline, 
-                manifest, 
-                cv_payload
-            )            
-
-        else:
-            final = _write_artifact(
-                Path(config.output.uri),
                 run,
                 pipeline,
-                manifest, 
-                cv_payload
+                manifest,
+                cv_payload,
+                on_written=tracking.log_artifacts,
             )
+        else:
+            final = _write_artifact(
+                Path(output_uri),
+                run,
+                pipeline,
+                manifest,
+                cv_payload,
+            )
+            tracking.log_artifacts(final)
     except (OSError, ValueError, storage.StorageError) as exc:
-        log.error(f"No se pudo escribir el artefacto: {exc}")
-        return 1
+        raise _TrainingError(f"No se pudo escribir el artefacto: {exc}") from exc
 
     log.info(f"artefacto: {final}")
     log.info(f"manifest: {manifest['config_hash']}")
     for name, values in metrics.items():
         log.info(f"{name}: {values['mean']:.4f} +- {values['std']:.4f}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
+    args = _parse_args(argv)
+
+    config, overrides, pipeline = _configurar(args)
+    if config is None:
+        return 2
+
+    now = provenance.utc_now()
+    run = provenance.run_id(now)
+    tags = {
+        "config_hash": provenance.config_hash(config),
+        "git_sha": provenance.git_sha(),
+        "git_dirty": "1" if provenance.git_dirty() else "0",
+    }
+
+    try:
+        # La corrida se abre antes de tocar datos: un fallo tambien queda registrado.
+        with tracking.session(config, run, tags) as mlflow_run_id:
+            _train(
+                config=config,
+                args=args,
+                overrides=overrides,
+                pipeline=pipeline,
+                run=run,
+                created_at=provenance.iso(now),
+                mlflow_run_id=mlflow_run_id,
+            )
+    except _TrainingError as exc:
+        log.error(str(exc))
+        return exc.code
+    except tracking.TrackingError as exc:
+        log.error(f"Tracking fallido: {exc}")
+        return 1
+    except RuntimeError as exc:
+        log.error(f"Tracking no disponible: {exc}")
+        return 1
     return 0
 
 if __name__ == "__main__":
